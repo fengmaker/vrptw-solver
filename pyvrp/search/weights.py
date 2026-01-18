@@ -1,0 +1,2 @@
+class Weights:
+    pass
