@@ -6,7 +6,7 @@ from src.visualizer import plot_solution  # <--- 导入绘图模块
 
 if __name__ == "__main__":
     # 配置
-    DATA_PATH = "data/C102.txt" # 数据文件路径
+    DATA_PATH = "data/C101.txt" # 数据文件路径
     TEST_SIZE = 20 # 跑全量
     
     if not os.path.exists(DATA_PATH):
