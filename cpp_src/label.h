@@ -1,15 +1,21 @@
-#pragma once // 防止头文件被重复引用
+// cpp_src/label.h
+#pragma once
 #include <vector>
+#include <cstdint> // for uint64_t
 
-// Label 结构体定义
-// 注意：这里没有 Python 的任何东西，只有纯 C++ 类型
+// 标签结构体
+// 使用索引(int)代替指针，防止 vector 扩容导致指针失效
 struct Label {
-    int node;
-    double cost;
-    double time;
-    int load;
+    int node_id;
+    int parent_index; // 指向 label_pool 中的父节点索引，-1 表示根
     
-    // 使用 vector 来存储多字位图 (Multi-word Bitset)
-    // 能够支持无限数量的节点 (100, 1000, 10000...)
-    std::vector<unsigned long long> visited_mask; 
+    double cost;      // Reduced Cost
+    double time;      // 累积时间 (Resource 1)
+    int load;         // 累积负载 (Resource 2)
+    
+    // 多字位图：支持任意数量的节点
+    // mask[0] 存节点 0-63, mask[1] 存 64-127...
+    std::vector<uint64_t> visited_mask; 
+    
+    bool active;      // 用于标记是否被支配（延迟删除）
 };

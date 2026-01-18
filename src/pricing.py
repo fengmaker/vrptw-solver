@@ -1,257 +1,161 @@
 from dataclasses import dataclass
-from typing import List, Any, Tuple, Optional
-from collections import deque
-import heapq
-import pricing_lib  # <--- [关键] 导入你编译好的 C++ 扩展模块
-
-def int_to_mask_list(big_mask_int):
-    """
-    把一个 Python 大整数切割成 [低64位, 高64位] 的列表传给 C++
-    """
-    # 0xFFFFFFFFFFFFFFFF 是 64 个 1
-    low_part = big_mask_int & 0xFFFFFFFFFFFFFFFF
-    high_part = big_mask_int >> 64
-    return [low_part, high_part]
+from typing import List, Tuple
+import pricing_lib  # <--- 导入编译好的 C++ 扩展模块
 
 @dataclass
-class Label:
+class Route:
     """
-    标签类 (Label)：用于在 Pricing 子问题中记录搜索状态。
+    用于返回给主问题的数据结构
     """
-    current_node: int
-    cost: float
-    time: float
-    load: int
-    visited_mask: int
-    parent: Optional['Label'] = None
-
+    path: List[int]
+    cost: float       # <--- [修改] 统一命名为 cost (对应 Reduced Cost)
+    real_cost: float  # 真实路程成本 (用于计算目标函数)
     def get_path(self) -> List[int]:
-        """
-        [核心功能] 回溯路径。
-        """
-        path: List[int] = []
-        curr: Optional['Label'] = self
-        while curr is not None:
-            path.append(curr.current_node)
-            curr = curr.parent
-        return path[::-1]
-
-class PricingSolver:
+        return self.path
     
+class PricingSolver:
     def __init__(self, instance):
-        self.inst = instance  # 持有数据引用
-        self.max_labels_per_node = 50  # 每个节点保留的最大标签数
-        self.EPS = 1e-5  # 容差值
+        self.inst = instance
+        # 请根据你的模型确认：固定成本是在这里加，还是在主问题 Duals 里处理
+        # 如果主问题的 Duals 包含了 convexity constraint 的 dual (比如 duals[0]), 
+        # 且该约束对应车辆数限制，那么 vehicle_fixed_cost 可能不需要在这里重复加。
+        # 这里保留原本逻辑。
         self.vehicle_fixed_cost = 2000.0
         
-        # --- C++ 加速器初始化 ---
-        # 告诉 C++ 我们有多少个节点，让它预分配内存
-        self.cpp_checker = pricing_lib.DominanceChecker(self.inst.num_nodes)
+        # =========================================
+        # 1. 数据转换 (Python Object -> C++ Struct)
+        # =========================================
+        cpp_data = pricing_lib.ProblemData()
+        cpp_data.num_nodes = instance.num_nodes
+        cpp_data.vehicle_capacity = instance.vehicle_capacity
+        
+        # 提取数据 (C++ vector <-> Python List)
+        cpp_data.demands = [c.demand for c in instance.customers]
+        cpp_data.service_times = [c.service_time for c in instance.customers]
+        cpp_data.tw_start = [c.tw_a for c in instance.customers]
+        cpp_data.tw_end = [c.tw_b for c in instance.customers]
+        
+        # 提取矩阵
+        cpp_data.dist_matrix = instance.dist_matrix
+        # 兼容性处理：如果没有 time_matrix，复用 dist_matrix
+        cpp_data.time_matrix = getattr(instance, 'time_matrix', instance.dist_matrix)
+        ng_size = 10 
+        ng_lists = []
 
-        # --- 预计算最近邻居 (Heuristic Preprocessing) ---
-        self.neighbor_limit = 20  # 只看最近的 20 个点
-        self.sorted_neighbors = []
-        
-        # 对每个节点 i，按距离对所有 j 进行排序
-        for i in range(self.inst.num_nodes):
-            neighbors = []
-            for j in range(self.inst.num_nodes):
-                if i != j:
-                    neighbors.append((self.inst.dist_matrix[i][j], j))
+        for i in range(instance.num_nodes):
+            # 拿到所有点到 i 的距离：(dist, node_index)
+            dists = []
+            for j in range(instance.num_nodes):
+                dists.append((instance.dist_matrix[i][j], j))
             
-            neighbors.sort(key=lambda x: x[0])
+            # 按距离排序
+            dists.sort(key=lambda x: x[0])
             
-            top_k = [n[1] for n in neighbors[:self.neighbor_limit]]
-            if 0 not in top_k:
-                top_k.append(0)  # 确保 Depot 总是在列表中
-            self.sorted_neighbors.append(top_k)
+            # 取最近的 ng_size 个点的索引
+            # 注意：这定义了“当我们到达 i 时，我们需要记住哪些点被访问过”
+            # 通常包含离 i 最近的那些点。
+            neighbors = [x[1] for x in dists[:ng_size]]
             
-    def _precompute_backward_bounds(self, duals):
-        """
-        优化版：基于时间窗排序的倒推 DP
-        """
-        num_nodes = self.inst.num_nodes
-        bounds = [1e9] * num_nodes
-        bounds[0] = 0.0
-        
-        sorted_nodes = sorted(range(1, num_nodes), 
-                              key=lambda x: self.inst.customers[x].tw_b, 
-                              reverse=True)
-        
-        for _ in range(1): 
-            for i in sorted_nodes:
-                min_val = 1e9
-                for j in self.sorted_neighbors[i]:
-                    if bounds[j] > 1e8: continue
-                        
-                    arrival_at_j = self.inst.customers[i].tw_a + \
-                                   self.inst.customers[i].service_time + \
-                                   self.inst.dist_matrix[i][j]
-                    if arrival_at_j > self.inst.customers[j].tw_b:
-                        continue
-                    
-                    edge_rc = self.inst.dist_matrix[i][j]
-                    if j != 0:
-                        edge_rc -= duals[j]
-                    
-                    if edge_rc + bounds[j] < min_val:
-                        min_val = edge_rc + bounds[j]
+            # 确保包含 0 (Depot)，虽然通常逻辑包含，但显式加上更安全
+            if 0 not in neighbors:
+                neighbors.append(0)
                 
-                bounds[i] = min_val
+            ng_lists.append(neighbors)
 
-        return bounds
-    
-    def solve(self, duals):
-        """
-        主入口：两阶段搜索策略
-        """
-        # --- Phase 1: 快速启发式搜索 ---
-        self.backward_bounds = self._precompute_backward_bounds(duals)
+        # 3. 传给 C++
+        # Pybind11 会自动把 List[List[int]] 转成 std::vector<std::vector<int>>
+        cpp_data.ng_neighbor_lists = ng_lists
+        # =========================================
+        # 2. 预处理邻居列表 (Heuristic Preprocessing)
+        # =========================================
+        neighbor_limit = 20  # <--- [修改] 设大一点，或者干脆对 R101 不做截断
+        cpp_neighbors = []
         
-        routes = self._solve_labeling(duals, heuristic_mode=True)
-        
-        if routes:
-            return routes
-            
-        # --- Phase 2: 精确搜索 ---
-        # 如果启发式没找到，启动全图搜索
-        routes = self._solve_labeling(duals, heuristic_mode=False)
-        return routes
-    
-    def _solve_labeling(self, duals, heuristic_mode=False):
-        """
-        [架构师修改版] 核心逻辑，接入 C++ DominanceChecker
-        """
-        # 1. 初始化
-        # 必须清空 C++ 中的缓存，否则上一轮的标签会干扰这一轮
-        self.cpp_checker.clear()
-
-        L0 = Label(0, 0.0, 0.0, 0, 1)
-        
-        # 将初始标签加入 C++ 检查器
-        self.cpp_checker.add_label(0, 0.0, 0.0, 0, [1, 0])
-
-        unprocessed = deque([L0])
-        
-        # Python 端的 node_labels 依然保留，用于最后截断和调试
-        node_labels = [[] for _ in range(self.inst.num_nodes)]
-        node_labels[0].append(L0)
-        
-        final_routes = []
-
-        # 2. 搜索循环
-        while unprocessed:
-            curr_label = unprocessed.popleft()
-            curr_node = curr_label.current_node
-            
-            # 决定搜索范围
-            if heuristic_mode:
-                search_scope = self.sorted_neighbors[curr_node]
-            else:
-                search_scope = range(self.inst.num_nodes)
+        for i in range(instance.num_nodes):
+            all_neighbors = []
+            for j in range(instance.num_nodes):
+                if i == j: continue
                 
-            # 遍历候选节点
-            for next_node in search_scope:
-                # 物理扩展 (生成 Python Label 对象)
-                new_label = self._extend(curr_label, next_node, duals)
-                
-                if new_label is None: continue 
-                
-                # 记录完整路径 (回到 Depot)
-                if next_node == 0:
-                    final_routes.append(new_label)
+                # [可选] 简单的时间窗剪枝
+                # 如果从 i 出发，即便全速赶路也无法在 j 的截止时间前到达，则断开连接
+                dist = instance.dist_matrix[i][j]
+                arrival_time = instance.customers[i].tw_a + instance.customers[i].service_time + dist
+                if arrival_time > instance.customers[j].tw_b:
                     continue
-                mask_list = int_to_mask_list(new_label.visited_mask)
-                # === [核心修改：调用 C++ 进行优越性检查] ===
-                # 这里不再调用 Python 的 _is_dominated，而是问 C++
-                # 速度提升约 50x - 100x
-                if self.cpp_checker.is_dominated(
-                    next_node, 
-                    new_label.cost, 
-                    new_label.time, 
-                    new_label.load, 
-                    mask_list
-                ):
-                    continue # 如果 C++ 说这个标签被支配了，直接丢弃
-                
-                # === [核心修改：同步数据] ===
-                # 如果标签有效，必须同时添加到 C++ (供后续比较) 和 Python (供回溯)
-                
-                # 1. 加入 C++ 内存池
-                self.cpp_checker.add_label(
-                    next_node, 
-                    new_label.cost, 
-                    new_label.time, 
-                    new_label.load, 
-                    mask_list
-                )
-                
-                # 2. 加入 Python 队列继续搜索
-                # 注意：为了保持 max_labels_per_node 的逻辑，我们依然在 Python 里做一次长度检查
-                # 虽然 C++ 里面可能存了超过 50 个，但这不影响正确性，只是稍微松一点
-                node_labels[next_node].append(new_label)
-                
-                # 简单的截断逻辑 (Optional: 可以在 Python 端做，也可以忽略)
-                if len(node_labels[next_node]) > self.max_labels_per_node:
-                    node_labels[next_node].sort(key=lambda x: x.cost)
-                    node_labels[next_node] = node_labels[next_node][:self.max_labels_per_node]
-                    # 如果 new_label 被挤出去了，就不要放入 unprocessed
-                    if new_label not in node_labels[next_node]:
-                         continue
-                
-                unprocessed.append(new_label)
-
-        # 3. 筛选并返回
-        valid_routes = []
-        for r in final_routes:
-            real_reduced_cost = r.cost + self.vehicle_fixed_cost
-            if real_reduced_cost < -1e-6:
-                r.cost = real_reduced_cost 
-                valid_routes.append(r)
-                
-        valid_routes.sort(key=lambda x: x.cost)
-        return valid_routes
-
-    def _extend(self, label, j, duals) -> Optional[Label]:
-        """
-        物理扩展逻辑 (保持不变)
-        """
-        i = label.current_node
-        customers = self.inst.customers
-        dist = self.inst.dist_matrix
-        
-        # 1. Elementary Check
-        if j != 0 and (label.visited_mask & (1 << j)):
-            return None 
-
-        # 2. Capacity Check
-        new_load = label.load + customers[j].demand
-        if new_load > self.inst.vehicle_capacity:
-            return None
-
-        # 3. Time Window Check
-        arrival = label.time + customers[i].service_time + dist[i][j]
-        start_time = max(arrival, customers[j].tw_a)
-        
-        if start_time > customers[j].tw_b + self.EPS:
-            return None
-
-        # 4. Reduced Cost Update
-        rc_step = dist[i][j] - duals[j]
-        new_cost = label.cost + rc_step
-        
-        future_cost = self.backward_bounds[j]
-        
-        # 路径连通性检查
-        if future_cost > 1e8: return None
+                    
+                all_neighbors.append((dist, j))
             
-        # 核心剪枝逻辑
-        if new_cost + future_cost + self.vehicle_fixed_cost > 1e-6:
-            return None
+            # 按距离排序
+            all_neighbors.sort(key=lambda x: x[0])
             
-        # 5. Update Mask
-        new_mask = (label.visited_mask | (1 << j)) & self.inst.ng_masks[j]
-        return Label(j, new_cost, start_time, new_load, new_mask, label)
+            # [核心修复]
+            # 如果是 Depot (0)，必须连接所有可行点，确保每个客户都能作为路径的起点！
+            # 如果是普通点，可以截断以加速
+            if i == 0:
+                sorted_indices = [x[1] for x in all_neighbors] # Depot 全连接
+            else:
+                sorted_indices = [x[1] for x in all_neighbors[:neighbor_limit]]
+            
+            # 确保回程可行：每个点的邻居里最好都包含 0
+            # (虽然 C++ 代码逻辑里通常是单独处理回 Depot 的，但加进去也没坏处)
+            if 0 not in sorted_indices:
+                sorted_indices.append(0)
+            
+            cpp_neighbors.append(sorted_indices)
+            
+        cpp_data.neighbors = cpp_neighbors
+
+        # =========================================
+        # 3. 初始化 C++ 求解器
+        # =========================================
+        # Bucket Step: 建议设为平均旅行时间的一半，例如 10.0
+        self.cpp_solver = pricing_lib.LabelingSolver(cpp_data, 10.0)
+
+    def solve(self, duals: List[float]) -> List[Route]:
+        """
+        调用 C++ 引擎求解
+        """
+        # 1. C++ 求解 (返回 List[List[int]])
+        raw_paths = self.cpp_solver.solve(duals)
         
-    # def _is_dominated(...) 
-    # 这个函数已经不需要了，被 C++ 取代
+        results = []
+        
+        # 2. 后处理
+        for path in raw_paths:
+            # 计算成本
+            r_cost, real_c = self._calculate_path_costs(path, duals)
+            
+            # 双重检查负 Reduced Cost
+            if r_cost < -1e-5:
+                # [修改] 这里实例化 Route 时使用 cost 参数
+                results.append(Route(path=path, cost=r_cost, real_cost=real_c))
+                
+        return results
+
+    def _calculate_path_costs(self, path: List[int], duals: List[float]) -> Tuple[float, float]:
+        """
+        计算 Reduced Cost 和 Real Cost
+        """
+        real_cost = 0.0
+        reduced_cost = 0.0
+        
+        # 加上固定成本
+        reduced_cost += self.vehicle_fixed_cost 
+        
+        curr = path[0]
+        for next_node in path[1:]:
+            dist = self.inst.dist_matrix[curr][next_node]
+            real_cost += dist
+            
+            # Reduced Cost 公式: c_ij - dual_j
+            rc_step = dist
+            if next_node != 0: 
+                # 注意：对偶变量通常对应客户约束 (index 1..N)
+                # 需确保 duals 列表长度正确且索引对齐
+                if next_node < len(duals):
+                    rc_step -= duals[next_node]
+            
+            reduced_cost += rc_step
+            curr = next_node
+            
+        return reduced_cost, real_cost

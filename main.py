@@ -2,7 +2,7 @@ import os
 import time
 from src.instance import VRPTWInstance
 from src.solver import CGSolver
-from src.visualizer import plot_solution  # <--- 导入绘图模块
+from src.visualizer import plot_solution
 
 if __name__ == "__main__":
     # 配置
@@ -14,10 +14,10 @@ if __name__ == "__main__":
         exit(1)
 
     # 1. 加载数据
-    instance = VRPTWInstance(DATA_PATH,verbose=True) # 去掉 max_customers 跑全量
+    instance = VRPTWInstance(DATA_PATH,verbose=False) # 去掉 max_customers 跑全量
     
     # 2. 初始化求解器
-    solver = CGSolver(instance,verbose=True)
+    solver = CGSolver(instance,verbose=False)
     
     # 3. 运行列生成
     start_time = time.perf_counter()

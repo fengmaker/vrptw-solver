@@ -1,8 +1,8 @@
 README.md
 pyproject.toml
 setup.py
-cpp_src/bindings.cpp
-cpp_src/dominance.cpp
+cpp_src/bind.cpp
+cpp_src/pricing_engine.cpp
 pricing_lib.egg-info/PKG-INFO
 pricing_lib.egg-info/SOURCES.txt
 pricing_lib.egg-info/dependency_links.txt
