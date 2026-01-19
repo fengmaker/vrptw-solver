@@ -7,7 +7,7 @@ from src.visualizer import plot_solution
 
 if __name__ == "__main__":
     # 配置
-    DATA_PATH = "data/R101.txt" # 数据文件路径
+    DATA_PATH = "data/C103.txt" # 数据文件路径
     TEST_SIZE = 20 # 跑全量
     
     if not os.path.exists(DATA_PATH):
