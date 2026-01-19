@@ -1,100 +1,188 @@
-这份报告旨在帮你梳理刚刚完成的代码重构工作。
+你好！我是 **OR-Architect**。很高兴看到你已经搭建起了一个基于 C++ 扩展和 Bitset 优化的 VRPTW 定价求解器雏形。你现在的代码是一个标准的 **"Forward Labeling with Static ng-Route"** 实现，这在处理 Solomon 100 节点规模的问题时是可行的，但若要对齐 **SOTA (Pessoa et al., 2020)** 的性能，特别是求解 200+ 节点或高难度的 Homberger 算例，我们需要对架构进行**手术级的重构**。
 
-从单文件脚本（Script）转向模块化工程（Project）是程序员进阶的重要一步。虽然文件变多了，看起来变复杂了，但这是为了驾驭更复杂问题的必经之路。
+你提到的**双向标签 (Bidirectional Labeling)**、**桶图 (Bucket Graph)** 和 **秩一切割 (Rank-1 Cuts)** 正是通往 SOTA 的必经之路。
 
----
-
-# 项目架构与文件职责说明报告
-
-## 1. 文件职责清单 (The "What")
-
-现在的项目像是一个精密的**工厂**，每个文件就是一个**专门的车间**，只负责一件特定的事情。
-
-### 📁 根目录
-
-* **`main.py` (启动器)**
-* **职责**：这是整个程序的入口（Ignition Key）。
-* **做什么**：它不包含任何算法逻辑。它只负责配置参数（如文件路径 `C101.txt`）、初始化数据对象、启动求解器，并打印最终结果。
-* **比喻**：它是汽车的**点火开关**和**仪表盘**。
-
-
-
-### 📁 src/ (源代码核心包)
-
-* **`__init__.py` (胶水)**
-* **职责**：告诉 Python “`src` 是一个可导入的包”。
-* **做什么**：通常是空的，或者用来暴露对外的接口。没有它，你无法跨文件夹 `import`。
-
-
-* **`models.py` (数据原子)**
-* **职责**：定义数据的**形状**。
-* **做什么**：这里只有 `Customer` 类定义。它不包含任何 `for` 循环或逻辑，只规定一个客户必须有 `id`, `x`, `y` 等属性。
-* **比喻**：这是**设计图纸**或**模具**。它规定了砖头长什么样，但它不负责砌墙。
-
-
-* **`instance.py` (数据中心)**
-* **职责**：负责脏活累活（读文件、算距离）并提供**只读数据**。
-* **做什么**：它把文本文件解析成内存里的对象。一旦加载完成，它就是上帝视角的“地图”。
-* **比喻**：这是**档案室**或**数据库**。所有算法都要来这里查阅距离和需求，但没人能修改这里的数据。
-
-
-* **`pricing.py` (物理引擎 / 子问题)**
-* **职责**：负责寻找一条“负 Reduced Cost”的路径。
-* **做什么**：包含了 `Label` 类、资源扩展函数 (`extend`)、支配规则 (`is_dominated`) 和标签搜索算法。这是计算最密集的地方。
-* **比喻**：这是**探路者**或**研发部门**。主问题说“我要这种类型的路径”，探路者就去地图上跑，找出一口符合要求的路径回来。
-
-
-* **`master.py` (决策大脑 / 主问题)**
-* **职责**：负责与 Gurobi 交互，维护线性规划模型。
-* **做什么**：初始化约束、添加列（变量）、获取对偶值（Duals）。它看不懂地图，它只看数学公式。
-* **比喻**：这是**总经理**。他不管具体车怎么开（那是 pricing 的事），他只管统筹安排，看报表（Objective Value），并发放奖金（Dual values）来指导下一步方向。
-
-
-* **`solver.py` (指挥官)**
-* **职责**：协调 Master 和 Pricing 的循环交互。
-* **做什么**：它写着 `while True` 循环。它拿 Master 的对偶值给 Pricing，拿 Pricing 的新路径给 Master，并判断何时停止。
-* **比喻**：这是**项目经理**。他负责在这个闭环中传递信息，确保总经理和研发部门配合工作。
-
-
+为了保证开发稳健推进，我制定了以下 **4 阶段演进路线图**。每一阶段都是可独立测试的里程碑。
 
 ---
 
-## 2. 为什么要分这么多文件？ (The "Why")
+### 🗺️ 总体架构演进路线 (Roadmap to SOTA)
 
-你可能会问：“我就写在一个 `vrptw.py` 里，一共 300 行，跑得也好好的，为什么要拆成 6 个文件？”
-
-这涉及软件工程的核心原则：**关注点分离 (Separation of Concerns)**。
-
-### 理由一：认知负荷 (Cognitive Load)
-
-* **单文件时**：当你修改标签算法时，你的眼睛需要在 Gurobi 的约束代码和文件读取代码之间来回滚动。你的大脑需要同时处理“读取文件”、“线性规划”和“动态规划”三个复杂的概念。
-* **拆分后**：当你打开 `pricing.py` 时，你的世界里只有图论和标签。你完全不需要关心文件是怎么读的，也不需要关心 Gurobi 是怎么解 LP 的。**你一次只处理一个难点。**
-
-### 理由二：可复用性与可替换性 (Modularity)
-
-* **场景**：假设明天你想把 Gurobi 换成开源的 SCIP 或 CPLEX。
-* **单文件时**：你需要在一堆代码里小心翼翼地把 Gurobi 相关的行挑出来删掉，很容易误删标签算法的逻辑。
-* **拆分后**：你只需要重写 `master.py`。`pricing.py` 和 `instance.py` 一个字都不用动。它们根本不在乎你用什么求解器。
-
-### 理由三：调试与测试 (Debugging)
-
-* **场景**：标签算法好像算错了，没找到最优路径。
-* **单文件时**：你必须每次都运行整个程序，等待文件读取，等待 Gurobi 初始化，才能测到标签算法。
-* **拆分后**：你可以新建一个 `test_pricing.py`，手动造几个点，直接调用 `PricingSolver` 进行单元测试，秒级反馈。
-
-### 理由四：未来扩展 (Scalability)
-
-这是最重要的理由。你现在的目标是**Branch-and-Price (分支定价)**。
-
-* 如果要加分支定界，你需要在**搜索树的每个节点**都运行列生成。
-* 如果是单文件，代码逻辑会复杂到让你崩溃（递归里套着循环，循环里套着 Gurobi）。
-* 拆分后，你只需要在 `solver.py` 上层再加一层 `branching.py`，调用现有的组件即可。
+| 阶段 | 核心任务 | 关键技术点 | 预期收益 |
+| --- | --- | --- | --- |
+| **Phase 1** | **数据结构重构** | **Bucket Graph (桶图)** | 消除无效边的遍历，提升缓存局部性，为双向搜索铺路。 |
+| **Phase 2** | **搜索算法升级** | **Bidirectional Labeling (双向搜索)** | 搜索空间从指数爆炸  降至 ，解决长路径问题。 |
+| **Phase 3** | **动态松弛策略** | **DSSR (Dynamic ng-Relaxation)** | 初始 ，仅在发现环路时动态添加邻域，大幅减少 Label 数量。 |
+| **Phase 4** | **下界强化** | **Limited Memory Rank-1 Cuts** | 引入子集行切平面 (SRI)，收紧线性松弛界，减少 B&B 节点数。 |
 
 ---
 
-## 3. 总结
+### 🚀 Phase 1: 桶图架构 (Bucket Graph Architecture)
 
-* **Single File (脚本)** = **瑞士军刀**。小巧、方便，适合解决一次性的小问题。
-* **Modular Project (工程)** = **专业手术刀套装**。每一把刀都有特定的用途，虽然占地方，但在做复杂手术（解决大规模 VRPTW）时，它是必须的。
+你当前的代码在 `solve` 函数中直接遍历 `buckets`，这其实是一种隐式的桶排序。SOTA 的 **Bucket Graph** 不仅仅是排序，它是将图结构本身离散化。
 
-你现在已经搭建好了一个**工业级求解器的骨架**。在这个骨架上，你可以稳健地添加分支定界、割平面、启发式初始化等高级功能，而不会导致代码坍塌。
+**核心思想：**
+根据资源的单调性（通常是时间），将节点放入离散的桶（Bucket）中。边（Arc）仅存在于桶之间（ where ）。这允许我们显式地**修剪掉大量不可行边**，并且在内存中连续存储，极度亲和 CPU Cache。
+
+#### ✅ 任务清单 (Action Items)
+
+1. **定义 `BucketGraph` 类**：接管原始的 `dist_matrix` 和 `neighbors`。
+2. **前向桶与后向桶**：为双向搜索做准备，分别构建 `ForwardBucketGraph` 和 `BackwardBucketGraph`。
+3. **重写 `LabelingSolver**`：不再遍历节点，而是遍历桶。
+
+#### 📐 C++ 架构设计 (Header Blueprint)
+
+```cpp
+// bucket_graph.h
+
+struct Arc {
+    int target_node;
+    double cost;   // Reduced Cost
+    double time;   // Travel Time
+    double demand; // Resource consumption
+    // ... 其他资源
+};
+
+struct Bucket {
+    int id;
+    double min_time;
+    double max_time;
+    std::vector<int> nodes; // 该桶内的节点
+    std::vector<Arc> outgoing_arcs; // 从该桶出发的边 (预处理过的)
+};
+
+class BucketGraph {
+public:
+    void build(const ProblemData& data, double bucket_interval, bool is_backward);
+    
+    // 获取某个时间点的桶索引
+    int get_bucket_index(double time) const;
+    
+    std::vector<Bucket> buckets;
+    // 关键：节点到桶的映射，用于快速查找
+    std::vector<int> node_to_bucket; 
+};
+
+```
+
+**🔍 检验标准 (Test Criteria):**
+
+* 在 Phase 1 结束时，你的求解器应仍使用单向 Labeling，但基于 `BucketGraph` 运行。
+* **性能指标**：对于 C101 等时间窗紧的算例，图构建时间 + 求解时间应比原版快 10-20%（因为预处理去除了不可行边）。
+
+---
+
+### ⚔️ Phase 2: 双向标签搜索 (Bidirectional Labeling)
+
+这是最艰难的一步。单向搜索在路径较长时（如 >50 个节点），Label 数量呈指数级增长。双向搜索从 Depot 同时向“前”和向“后”扩展，在中间“资源减半”处接合（Join/Merge）。
+
+#### ✅ 任务清单 (Action Items)
+
+1. **实现 `BackwardLabel**`：注意资源消耗的逆向逻辑（例如：从  回到 ，时间是 ）。
+2. **定义 `Merge` 策略**：当  时尝试合并。
+3. **实现 `REF` (Resource Extension Function)**：将资源扩展逻辑解耦，避免代码重复。
+
+#### 📐 C++ 核心逻辑预览
+
+你需要修改 `solve` 函数，变为三段式：
+
+```cpp
+// pricing_engine.cpp
+
+void BidirectionalSolver::solve() {
+    // 1. Forward Extension (限制扩展到 max_time / 2)
+    run_forward_labeling();
+
+    // 2. Backward Extension (限制扩展到 max_time / 2)
+    run_backward_labeling();
+
+    // 3. Merge (Join)
+    // 遍历所有节点，匹配 Forward Labels 和 Backward Labels
+    for (int i = 0; i < num_nodes; ++i) {
+        for (const auto& L_f : forward_labels[i]) {
+            for (const auto& L_b : backward_labels[i]) {
+                if (check_merge_feasibility(L_f, L_b)) {
+                    add_to_results(L_f, L_b);
+                }
+            }
+        }
+    }
+}
+
+```
+
+**🔍 检验标准 (Test Criteria):**
+
+* 在 Solomon R2 系列（长路径、宽时间窗）算例上，求解速度应提升 **5-10倍**。
+* 必须验证双向搜索得到的 Reduced Cost 最优值与单向搜索**完全一致**（精度误差 ）。
+
+---
+
+### 🔬 Phase 3: 动态 ng-松弛 (DSSR)
+
+SOTA 求解器不会一开始就使用静态的 -集（如你代码中的 `ng_neighbor_lists`）。
+
+**SOTA 策略：**
+
+1. 初始化：所有节点的 -集为空（即允许所有环路，等同于 SPPRC，松弛度最大）。
+2. 求解定价问题。
+3. 检查最优路径是否有环？
+* 无环 -> 也是原问题的可行解，DONE。
+* 有环 () -> 将  加入相关节点的 -集，禁止该特定环。
+* **GOTO 2** (重新求解定价问题)。
+
+
+
+#### ✅ 任务清单 (Action Items)
+
+1. **修改 Python 端**：实现一个循环，控制 Pricing 的迭代。
+2. **修改 C++ 端**：支持动态更新 `data.ng_masks` 而不需要重建整个图。
+
+**🔍 检验标准 (Test Criteria):**
+
+* 虽然需要多次求解 Pricing，但由于初始状态空间极小，总体收敛速度在困难算例上应显著提升。
+
+---
+
+### 🛡️ Phase 4: 有限记忆 Rank-1 切平面 (Rank-1 Cuts)
+
+根据 Pessoa (2020)，仅靠列生成无法证明解的最优性。我们需要在主问题添加切平面。
+
+**难点：**
+标准的切平面（如子集行切平面 Subset-Row Cuts）会增加 Pricing 问题中的对偶变量，导致状态空间爆炸。
+**解决方案：** **Limited Memory (有限记忆)**。只在切平面相关的节点附近（Memory Arc Set）记录切平面的对偶值，离开该区域后就“遗忘”该切平面的影响。
+
+#### ✅ 任务清单 (Action Items)
+
+1. **Python 端**：使用 separation heuristic 寻找违反的 Rank-1 Cuts。
+2. **C++ 端**：在 `Label` 结构中增加 `cut_dual_sum` 字段。
+3. **扩展 REF**：在经过特定边时，累加切平面的对偶值。
+
+---
+
+### 🛠️ 当前代码的具体改进建议 (Immediate Steps)
+
+在你开始大的重构之前，针对你现有的 `pricing_engine.cpp`，我有以下**高性能工程化 (High-Performance Engineering)** 建议，可以立即应用：
+
+1. **Label 内存池 (Memory Pool)**:
+* *现状*：`std::vector<Label> label_pool` 是全局的。
+* *改进*：在双向搜索中，Labels 会频繁创建和销毁。建议使用自定义的 `BlockAllocator`，避免 `std::vector` 扩容带来的数据搬迁。
+
+
+2. **位运算优化**:
+* *现状*：`FastBitset` 很好。
+* *改进*：确保 `apply_ng_relaxation` 函数是 `inline` 的，并且在编译时开启 `-O3 -march=native`，让编译器使用 AVX 指令集并行处理那 4 个 `uint64_t`。
+
+
+3. **支配规则 (Dominance Rule) 的细节**:
+* *现状*：你目前的支配规则比较基础。
+* *SOTA 建议*：由于 Bucket Graph 天然满足时间序，**Label 不需要存储时间 (Time)** 用于支配比较（如果是在同一个 Bucket 内比较）。在同一个 Bucket 内，时间差异通常很小，可以弱化时间的比较权重，强化 Reduced Cost 的比较。
+
+
+
+---
+
+### 📢 Next Step
+
+**您想先从 Phase 1 (构建 Bucket Graph) 开始吗？**
+如果是，我可以为你提供 `BucketGraph` 的详细 C++ 实现代码，以及如何在 Python 中高效预处理数据并传递给 C++ 的接口定义。这将为你后续的双向搜索打下坚实的地基。

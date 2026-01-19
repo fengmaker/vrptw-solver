@@ -1,3 +1,4 @@
+from encodings.punycode import T
 import os
 import time
 from src.instance import VRPTWInstance
@@ -6,7 +7,7 @@ from src.visualizer import plot_solution
 
 if __name__ == "__main__":
     # 配置
-    DATA_PATH = "data/C101.txt" # 数据文件路径
+    DATA_PATH = "data/R101.txt" # 数据文件路径
     TEST_SIZE = 20 # 跑全量
     
     if not os.path.exists(DATA_PATH):
@@ -14,10 +15,10 @@ if __name__ == "__main__":
         exit(1)
 
     # 1. 加载数据
-    instance = VRPTWInstance(DATA_PATH,verbose=False) # 去掉 max_customers 跑全量
+    instance = VRPTWInstance(DATA_PATH,verbose=True) # 去掉 max_customers 跑全量
     
     # 2. 初始化求解器
-    solver = CGSolver(instance,verbose=False)
+    solver = CGSolver(instance,verbose=True)
     
     # 3. 运行列生成
     start_time = time.perf_counter()
@@ -35,8 +36,8 @@ if __name__ == "__main__":
     print(f"DISTANCE: {integer_dist:.2f}")
     print(f"TIME    : {end_time - start_time:.4f} s")
     print("="*40)
-
+    ins_name = DATA_PATH.split('/')[-1].split('.')[0]
     # 6. 可视化
     if final_routes:
-        chart_title = f"R101 Solution: {len(final_routes)} Vehicles, Dist {integer_dist:.2f}"
+        chart_title = f"{ins_name}: Optimal Integer Solution: {len(final_routes)} Vehicles, Dist {integer_dist:.2f}"
         plot_solution(instance, final_routes, title=chart_title)

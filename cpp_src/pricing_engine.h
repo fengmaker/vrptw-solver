@@ -42,6 +42,8 @@ struct FastBitset {
     }
 };
 
+
+
 // 2. 修改 ProblemData
 struct ProblemData {
     int num_nodes;
@@ -73,6 +75,26 @@ struct Label {
     bool active;
 };
 
+// [新增] 定义紧凑的边结构，优化内存布局
+struct Arc {
+    int target;       // 目标节点 ID
+    double cost;      // 预计算的 Reduced Cost (部分) 或 距离成本
+    double duration;  // Travel Time + Service Time (预计算)
+    double distance;  // 用于计算真实成本
+    int demand;       // 资源消耗
+};
+
+// [新增] 桶图类：负责管理拓扑结构
+class BucketGraph {
+public:
+    // 存储每个节点出发的“可行”边
+    // vector index: from_node_id
+    std::vector<std::vector<Arc>> nodes_outgoing_arcs;
+    
+    // 构造函数：预处理和剪枝
+    void build(const ProblemData& data);
+};
+
 class LabelingSolver {
 public:
     LabelingSolver(ProblemData p_data, double p_bucket_step);
@@ -80,6 +102,7 @@ public:
 
 private:
     ProblemData data;
+    BucketGraph graph; // [新增]
     double bucket_step;
     std::vector<Label> label_pool;
     std::vector<std::vector<int>> dominance_sets;

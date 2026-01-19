@@ -49,7 +49,7 @@ def plot_solution(instance, routes, title="VRPTW Solution"):
     # ---------------------------------------------------------
     
     # 定义保存目录
-    save_dir = "result"
+    save_dir = "result/images"
     
     # 如果目录不存在，自动创建
     if not os.path.exists(save_dir):

@@ -13,7 +13,9 @@ LabelingSolver::LabelingSolver(ProblemData p_data, double p_bucket_step)
     buckets.resize(num_buckets);
     dominance_sets.resize(data.num_nodes);
     label_pool.reserve(500000); // 预分配大量空间，减少 resize
-
+    // [新增] 构建静态图
+    // 这会在 C++ 侧初始化时只运行一次，极大节省后续多次 solve 的时间
+    graph.build(data); 
     // === 新增：初始化 ng_masks ===
     // 将 Python 传来的 int 列表转换为 FastBitset
     data.ng_masks.resize(data.num_nodes);
@@ -70,6 +72,49 @@ bool LabelingSolver::check_and_update_dominance(int node, const Label& new_label
     return false; // 新 Label 存活
 }
 
+// [新增] 构建图：预计算 + 强剪枝
+void BucketGraph::build(const ProblemData& data) {
+    nodes_outgoing_arcs.resize(data.num_nodes);
+
+    for (int i = 0; i < data.num_nodes; ++i) {
+        // 预分配内存，避免 push_back 导致的重分配（假设平均每个点 20-50 个邻居）
+        nodes_outgoing_arcs[i].reserve(data.num_nodes / 2); 
+
+        // 遍历所有可能的邻居（这里用原始数据中的全连接或近邻表）
+        // 如果你的 data.neighbors 已经是近邻表，就在此基础上过滤
+        const auto& candidates = data.neighbors[i]; // 或者 0..num_nodes
+
+        for (int j : candidates) {
+            if (i == j) continue;
+
+            // --- 静态剪枝 (Static Pruning) ---
+            
+            // 1. 容量剪枝 (Capacity Cut)
+            if (data.demands[i] + data.demands[j] > data.vehicle_capacity) continue;
+
+            // 2. 时间窗剪枝 (Time Window Cut)
+            // 最早到达 j 的时间 = max(TW_start[i], arrival_at_i) + service[i] + travel[i][j]
+            // 这里我们用最宽松的条件：i 的最早出发时间 + 路程
+            double min_arrival = data.tw_start[i] + data.service_times[i] + data.time_matrix[i][j];
+            if (min_arrival > data.tw_end[j]) continue;
+
+            // --- 构建弧 (Arc) ---
+            Arc arc;
+            arc.target = j;
+            // 注意：Reduced Cost 依赖 Duals，是动态的，所以这里只存静态的距离成本
+            // 在 solve 中我们再减去 duals[j]
+            arc.cost = data.dist_matrix[i][j]; 
+            // 预计算 duration = travel + service_at_i (注意定义的语义)
+            // 通常 label.time 是到达时间。到达 j = 到达 i + service_at_i + travel
+            arc.duration = data.service_times[i] + data.time_matrix[i][j];
+            arc.distance = data.dist_matrix[i][j];
+            arc.demand = data.demands[j];
+
+            nodes_outgoing_arcs[i].push_back(arc);
+        }
+    }
+}
+
 // =======================
 // 主求解逻辑
 // =======================
@@ -108,28 +153,34 @@ std::vector<std::vector<int>> LabelingSolver::solve(const std::vector<double>& d
             const Label curr_label = label_pool[curr_idx]; 
 
             int i = curr_label.node_id;
-            
-            // 遍历邻居
-            for (int j : data.neighbors[i]) {
-                // a. ng-Route 可行性检查
-                // 检查 j 是否在当前的 ng-relaxed mask 中
-                // 如果在 mask 中，说明 j 之前访问过，且属于 j 自己的“记忆集”，不能再访问
+            // [修改] 使用 BucketGraph 的预处理弧进行遍历
+            // 这里的 arcs 已经是经过“容量”和“静态时间窗”过滤的
+            const auto& arcs = graph.nodes_outgoing_arcs[i];
+            for (const auto& arc : arcs) {
+                int j = arc.target;
+
+                // a. ng-Route 可行性检查 (保持不变)
                 if (curr_label.visited_mask.test(j)) continue;
 
-                // b. 资源检查
-                int new_load = curr_label.load + data.demands[j];
+                // b. 资源检查 (简化版)
+                // 静态容量已经在 build 时检查过了，但在 Labeling 中累积容量仍需检查
+                int new_load = curr_label.load + arc.demand;
                 if (new_load > data.vehicle_capacity) continue;
 
-                double travel_time = data.time_matrix[i][j];
-                double arrival = curr_label.time + data.service_times[i] + travel_time;
+                // 时间计算：直接使用预计算的 duration
+                double arrival = curr_label.time + arc.duration;
                 double start_time = std::max(arrival, data.tw_start[j]);
 
+                // [关键] 此时再做一次动态时间窗检查
+                // 虽然 build 时做了检查，但那是基于 i 的最早时间。
+                // 现在的 curr_label.time 可能比最早时间晚，所以必须检查。
                 if (start_time > data.tw_end[j]) continue;
 
-                // c. 计算 Cost
-                double rc = data.dist_matrix[i][j] - duals[j]; // Reduced Cost
+                // c. 计算 Cost (结合 Duals)
+                // Reduced Cost = arc.cost (distance) - duals[j]
+                double rc = arc.cost - duals[j];
                 double new_cost = curr_label.cost + rc;
-
+                
                 // d. 构造新掩码 (ng-relaxation 核心)
                 // NewMask = (OldMask & ng_mask[j]) | {j}
                 FastBitset new_mask = curr_label.visited_mask.apply_ng_relaxation(data.ng_masks[j], j);
