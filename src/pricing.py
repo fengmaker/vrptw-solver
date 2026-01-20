@@ -115,16 +115,14 @@ class PricingSolver:
         """
         调用 C++ 引擎求解
         """
-        # 1. C++ 求解 (返回 List[List[int]])
+        # 1. C++ 求解
         raw_paths = self.cpp_solver.solve(duals)
-        
         results = []
         
         # 2. 后处理
         for path in raw_paths:
             # 计算成本
             r_cost, real_c = self._calculate_path_costs(path, duals)
-            
             # 双重检查负 Reduced Cost
             if r_cost < -1e-5:
                 # [修改] 这里实例化 Route 时使用 cost 参数

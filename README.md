@@ -186,3 +186,131 @@ SOTA 求解器不会一开始就使用静态的 -集（如你代码中的 `ng_ne
 
 **您想先从 Phase 1 (构建 Bucket Graph) 开始吗？**
 如果是，我可以为你提供 `BucketGraph` 的详细 C++ 实现代码，以及如何在 Python 中高效预处理数据并传递给 C++ 的接口定义。这将为你后续的双向搜索打下坚实的地基。
+
+这是一个非常棒的进阶方向。从单向搜索（Forward Labeling）转向**双向搜索（Bidirectional Labeling）**是商用级求解器（如 VRPSolver, Gurobi 内部 VRP 引擎）的标准做法，能极大减少长路径下的搜索空间。
+
+在“大厂”或顶尖实验室（如生产环境下的运筹优化团队），我们不会直接上来就写代码。我们会遵循 **Design (设计) -> Interface (接口) -> Test Plan (测试计划) -> Implementation (实现)** 的流程。
+
+以下是按照这种“大厂工程模式”为你准备的**双向搜索开发文档和实施指南**。
+
+---
+这是一个非常高阶的需求。为了让AI（无论是ChatGPT, Claude还是Gemini）完美配合你的“大厂开发模式”，你需要设定一套**“系统级指令” (System Instructions)**。
+
+你不只是在问问题，你是在**定义AI的工作流协议 (Protocol)**。
+
+下面我为你准备了一套**“全栈算法工程师”提示词模板**。你可以把这段话保存下来，在每次开启新对话或者开始写新模块时，直接发给AI作为第一条指令。
+
+---
+
+### 🚀 核心提示词模板 (Master System Prompt)
+
+请复制以下内容发送给 AI：
+
+```markdown
+# Role Definition
+你现在是我的 Senior C++/Python Algorithm Architect（高级算法架构师）。我们将采用 "Hybrid Programming"（混合编程）模式开发一个高性能 VRPTW 求解器。核心计算在 C++，胶水逻辑和测试在 Python。
+
+# Development Protocol (Strict Workflow)
+对于我提出的任何新功能（Feature）或模块（Module）开发请求，你**必须**严格遵循以下 6 步开发流程，不要跳步：
+
+**Phase 1: Design & I/O Definition (设计与接口定义)**
+- 在写代码前，先用自然语言和伪代码定义：
+    1.  C++ 类/函数签名（Header定义）。
+    2.  **Input**: 具体的参数类型（如 `vector<double>& duals`）。
+    3.  **Output**: 返回值结构（如 `vector<int> path`）。
+    4.  **Debug Interface**: 明确通过 `pybind11` 暴露给 Python 的调试接口名称（例如 `debug_run_xxx`）。
+
+**Phase 2: Binding & Stub (绑定与桩代码)**
+- 提供修改 `bindings.cpp` 的代码，暴露上述 Debug 接口。
+- 提供 C++ 的桩代码（Stub），确保可以编译通过，但暂时返回空结果或 Mock 结果。这一步是为了打通 Python 到 C++ 的链路。
+
+**Phase 3: Unit Test Script (单元测试脚本)**
+- **强制要求**：编写一个独立的 Python 脚本（如 `tests/test_feature_name.py`）。
+- **数据要求**：不要读取外部文件。必须在脚本内构造 "Toy Data"（如 3-5 个点的 Mock 数据）。
+- **验证逻辑**：调用 Phase 2 中的 Debug 接口，并使用 `assert` 验证预期行为。此时测试应该能运行（虽然逻辑未实现）。
+
+**Phase 4: Core Implementation (核心实现)**
+- 编写 C++ `.cpp` 文件的具体逻辑实现。
+- 包含详细的注释，解释核心算法（如资源校验、位运算、标签扩展）。
+
+**Phase 5: Verification (验证)**
+- 指导我运行 Phase 3 的脚本，并描述如果逻辑正确，控制台应该输出什么。
+
+**Phase 6: Integration (集成 - 仅在测试通过后)**
+- 只有当前面步骤都确认无误后，才给出将其合并到主逻辑（如 `solve()` 函数）的代码。
+- (可选) 提示我是否需要删除 Debug 接口，或将其保留在 `#ifdef DEBUG` 中。
+
+# Constraint
+- **Code Separation**: 始终保持 C++ 负责计算，Python 负责测试的边界。
+- **No Hallucinations**: 如果涉及到数学公式（如 Reduced Cost 或 Time Window 更新），请先列出公式再写代码。
+
+---
+现在，请确认你理解了这套流程。我的第一个任务是：**[在此处填入你的具体任务]**
+
+```
+
+---
+
+### 🛠️ 实战演练：如何使用这套提示词
+
+有了上面的“总纲”，你每次发布任务只需要非常简短、精准的指令。
+
+#### 场景 1：你想开发“反向搜索” (Backward Search)
+
+**你发送给 AI：**
+
+> （发送完上面的 Master Prompt 后）
+> **任务**：实现 VRPTW 的 **反向标签搜索 (Backward Labeling)** 核心逻辑。
+> **具体要求**：
+> 1. 需要在 `ProblemData` 中处理反向边。
+> 2. 实现 `extend_backward` 函数。
+> 3. 暴露 `debug_run_backward` 给 Python。
+> 4. 测试脚本里要验证：对于简单的 0->1->2->0 算例，反向搜索是否能找到反序路径。
+> 
+> 
+
+**AI 的反应**：
+它会立刻按照 **Phase 1 -> Phase 6** 的格式输出：
+
+1. 先给你 `.h` 文件改动。
+2. 再给你 `bindings.cpp` 的改动。
+3. 接着直接给你 `tests/test_backward.py`。
+4. 最后才给你 `pricing_engine.cpp` 的复杂逻辑。
+
+---
+
+#### 场景 2：你想开发“双向拼接” (Merge/Join)
+
+**你发送给 AI：**
+
+> **任务**：实现 **双向路径拼接 (Bidirectional Merge)**。
+> **具体要求**：
+> 1. 输入是正向 Label 桶和反向 Label 桶。
+> 2. 输出是拼接好的完整路径和 Reduced Cost。
+> 3. 需要暴露 `debug_merge_buckets` 给 Python，我会在 Python 里手动构造两个半截 Label 传进去测。
+> 4. 这里的测试脚本要非常细致，要手动造两个能拼上的 Label，验证资源检查逻辑是否正确。
+> 
+> 
+
+---
+
+#### 场景 3：项目收尾，清理接口
+
+**你发送给 AI：**
+
+> **任务**：现在反向搜索和拼接都测试通过了，我们要上线到主程序。
+> **具体要求**：
+> 1. 修改 `solve()` 主函数，整合双向搜索逻辑。
+> 2. 告诉我如何优雅地处理那些 `debug_run_xxx` 接口？是删掉，还是注释掉？请给出代码清理建议。
+> 
+> 
+
+---
+
+### 💡 为什么这套提示词有效？
+
+1. **强制解耦 (Decoupling)**：你强迫 AI 必须先给你 Test Script。这就避免了 AI 写了一堆 C++ 代码，结果你为了测试它，还得去改几十行 Python 主程序的痛苦。
+2. **接口先行 (API First)**：Phase 1 强制定义 I/O。这避免了 AI 写了一半发现“哎呀，少传了一个参数”，然后让你改来改去的“打补丁”式开发。
+3. **Mock 数据 (Toy Data)**：Phase 3 强制不读文件。这使得调试周期从“几分钟（读大文件+计算）”缩短到“几毫秒”，极大提升开发效率。
+
+这一套就是标准的**测试驱动开发 (TDD)** 在 AI 辅助编程下的最佳实践。你可以现在就试试看！

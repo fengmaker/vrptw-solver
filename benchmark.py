@@ -134,6 +134,6 @@ if __name__ == "__main__":
     # 如果命令行没有给参数，默认运行列表（你可以在这里手动修改默认测试集）
     target_list = args.instances
     if not target_list:
-        target_list = ["C101", "C102", "R101"] # <--- 默认列表在这里改
+        target_list = ["C101", "C102","R101","R102"] # <--- 默认列表在这里改
         
     run_benchmark(target_list)

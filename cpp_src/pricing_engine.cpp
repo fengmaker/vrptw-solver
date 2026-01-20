@@ -3,34 +3,37 @@
 // =======================
 // 构造函数
 // =======================
-// ==========================================
-// 2. Solver 构造函数 (初始化两个图)
-// ==========================================
 LabelingSolver::LabelingSolver(ProblemData p_data, double p_bucket_step) 
     : data(p_data), bucket_step(p_bucket_step) {
     
-    // 初始化标签存储容器
-    fwd_labels.reserve(200000);
-    bwd_labels.reserve(200000);
-
-    // 构建双向图
-    fwd_graph.build(data, false); // Forward
-    bwd_graph.build(data, true);  // Backward
-
-    // 初始化 ng_masks (同前)
+    double max_horizon = 0;
+    for(double t : data.tw_end) max_horizon = std::max(max_horizon, t);
+    int num_buckets = (int)(max_horizon / bucket_step) + 10;
+    
+    buckets.resize(num_buckets);
+    dominance_sets.resize(data.num_nodes);
+    label_pool.reserve(500000); // 预分配大量空间，减少 resize
+    // [新增] 构建静态图
+    // 这会在 C++ 侧初始化时只运行一次，极大节省后续多次 solve 的时间
+    graph.build(data); 
+    // === 新增：初始化 ng_masks ===
+    // 将 Python 传来的 int 列表转换为 FastBitset
     data.ng_masks.resize(data.num_nodes);
-    if (data.ng_neighbor_lists.empty()) {
-        for (int i = 0; i < data.num_nodes; ++i) 
-            for(int k=0; k<256; ++k) data.ng_masks[i].set(k);
-    } else {
-        for (int i = 0; i < data.num_nodes; ++i) {
+    for (int i = 0; i < data.num_nodes; ++i) {
+        // 如果 Python 没传数据，默认全集 (退化为基本路径 ESPPRC)
+        if (data.ng_neighbor_lists.empty()) {
+            for(int k=0; k<256; ++k) data.ng_masks[i].set(k); 
+        } else {
+            // 设置 ng-集 中的位
             for (int neighbor_idx : data.ng_neighbor_lists[i]) {
                 data.ng_masks[i].set(neighbor_idx);
             }
+            // 必须包含自己 (自己总是被记住的)
             data.ng_masks[i].set(i);
         }
     }
 }
+
 // =======================
 // 核心：双向支配 (Bi-directional Dominance)
 // =======================
@@ -70,281 +73,191 @@ bool LabelingSolver::check_and_update_dominance(int node, const Label& new_label
 }
 
 // [新增] 构建图：预计算 + 强剪枝
-void BucketGraph::build(const ProblemData& data, bool is_backward) {
-    nodes_outgoing_arcs.clear();
+void BucketGraph::build(const ProblemData& data) {
     nodes_outgoing_arcs.resize(data.num_nodes);
 
     for (int i = 0; i < data.num_nodes; ++i) {
-        // 原始数据的 neighbors 是物理上的出边
-        // 如果是 Backward Graph，我们需要知道 "谁能走到 i" (入边)
-        // 或者简单起见，我们遍历所有点对 (既然做了剪枝，性能尚可)
-        // 更好的方式：Python 传入 data.predecessors，或者在这里全遍历过滤
-        
-        // 为了演示清晰，这里假设全遍历检查 (实际工程中应用反向邻接表优化)
-        const auto& candidates = data.neighbors[i]; // i 的物理邻居
+        // 预分配内存，避免 push_back 导致的重分配（假设平均每个点 20-50 个邻居）
+        nodes_outgoing_arcs[i].reserve(data.num_nodes / 2); 
 
-        for (int j : candidates) { // 物理边 i -> j
+        // 遍历所有可能的邻居（这里用原始数据中的全连接或近邻表）
+        // 如果你的 data.neighbors 已经是近邻表，就在此基础上过滤
+        const auto& candidates = data.neighbors[i]; // 或者 0..num_nodes
+
+        for (int j : candidates) {
             if (i == j) continue;
 
-            // 容量剪枝 (方向无关)
+            // --- 静态剪枝 (Static Pruning) ---
+            
+            // 1. 容量剪枝 (Capacity Cut)
             if (data.demands[i] + data.demands[j] > data.vehicle_capacity) continue;
 
+            // 2. 时间窗剪枝 (Time Window Cut)
+            // 最早到达 j 的时间 = max(TW_start[i], arrival_at_i) + service[i] + travel[i][j]
+            // 这里我们用最宽松的条件：i 的最早出发时间 + 路程
+            double min_arrival = data.tw_start[i] + data.service_times[i] + data.time_matrix[i][j];
+            if (min_arrival > data.tw_end[j]) continue;
+
+            // --- 构建弧 (Arc) ---
             Arc arc;
-            
-            if (!is_backward) {
-                // === Forward Logic (i -> j) ===
-                double arrival = data.tw_start[i] + data.service_times[i] + data.time_matrix[i][j];
-                if (arrival > data.tw_end[j]) continue;
+            arc.target = j;
+            // 注意：Reduced Cost 依赖 Duals，是动态的，所以这里只存静态的距离成本
+            // 在 solve 中我们再减去 duals[j]
+            arc.cost = data.dist_matrix[i][j]; 
+            // 预计算 duration = travel + service_at_i (注意定义的语义)
+            // 通常 label.time 是到达时间。到达 j = 到达 i + service_at_i + travel
+            arc.duration = data.service_times[i] + data.time_matrix[i][j];
+            arc.distance = data.dist_matrix[i][j];
+            arc.demand = data.demands[j];
 
-                arc.target = j;
-                arc.cost = data.dist_matrix[i][j]; 
-                arc.duration = data.service_times[i] + data.time_matrix[i][j];
-                arc.demand = data.demands[j]; // 累加 j 的需求
-                arc.distance = data.dist_matrix[i][j];
-                
-                nodes_outgoing_arcs[i].push_back(arc);
-            } else {
-                // === Backward Logic ===
-                // 物理边是 i -> j。
-                // 在后向搜索中，我们目前的 Label 在 j，要试图"退回"到 i。
-                // 所以我们在 j 的出边列表中添加一个指向 i 的边。
-                // 这里的循环结构需要调整：外层循环遍历的是 "Source Node" in Search Graph.
-                // 如果是 Backward，Source Node 是 j，Target 是 i。
-            }
-        }
-    }
-
-    // 修正：上面的循环结构对于 Backward 构建不太高效。
-    // 建议采用两遍循环分离写法：
-    
-    if (is_backward) {
-        // 重置并在下面重新填充
-        nodes_outgoing_arcs.clear(); 
-        nodes_outgoing_arcs.resize(data.num_nodes);
-        
-        for (int i = 0; i < data.num_nodes; ++i) { // i is Physical Start
-            for (int j : data.neighbors[i]) {      // j is Physical End
-                if (i == j) continue;
-                
-                // 物理边 i -> j. 
-                // 后向搜索图：从 j -> i
-                // 时间检查：从 j 出发(最晚时间)，减去路程，能否在 i 的最晚时间之前离开 i?
-                // Backward Time: "Latest Departure Time from Node"
-                // strict logic needed here.
-                
-                // 简单处理：仅添加反向边，具体时间窗在 Labeling 中检查
-                // 或者在这里做粗略剪枝
-                Arc arc;
-                arc.target = i; // 反向：目标是 i
-                arc.cost = data.dist_matrix[i][j]; 
-                // 后向 Duration: 我们需要减去 (Travel_ij + Service_i)
-                arc.duration = data.time_matrix[i][j] + data.service_times[i]; 
-                arc.demand = data.demands[i]; // 退回到 i，累加 i 的需求
-                arc.distance = data.dist_matrix[i][j];
-
-                // 将边加入 j 的列表 (因为搜索是从 j 扩展到 i)
-                nodes_outgoing_arcs[j].push_back(arc);
-            }
+            nodes_outgoing_arcs[i].push_back(arc);
         }
     }
 }
 
-void LabelingSolver::run_forward_labeling(const std::vector<double>& duals) {
-    // 初始化 Root (Depot)
+// =======================
+// 主求解逻辑
+// =======================
+std::vector<std::vector<int>> LabelingSolver::solve(const std::vector<double>& duals) {
+    // 1. 重置
+    label_pool.clear();
+    for(auto& vec : dominance_sets) vec.clear();
+    for(auto& vec : buckets) vec.clear();
+
+    // 2. 初始化 Root Label (Depot)
     Label root;
     root.node_id = 0;
     root.parent_index = -1;
     root.cost = 0.0;
     root.time = data.tw_start[0];
     root.load = 0;
-    root.visited_mask.set(0);
+    root.visited_mask.set(0); 
     root.active = true;
 
-    fwd_labels.push_back(root);
-    nodes_fwd_labels[0].push_back(0);
+    label_pool.push_back(root);
+    buckets[0].push_back(0);
+    dominance_sets[0].push_back(0);
 
-    // 简单队列 (BFS) - 实际应用中可用桶排序优化
-    int head = 0;
-    while(head < fwd_labels.size()) {
-        int curr_idx = head++;
-        const Label& curr = fwd_labels[curr_idx];
-        if (!curr.active) continue;
+    // 3. Bucket 循环
+    for (int b = 0; b < buckets.size(); ++b) {
+        // 使用索引遍历，因为 buckets[b] 可能在循环中不被修改，
+        // 但为了安全和性能，最好将本轮要处理的全部取出来，或者标准索引遍历
+        // 注意：Labeling 算法中，推入的桶索引通常 >= 当前桶，所以当前桶不会增加元素
+        const auto& current_bucket_indices = buckets[b];
         
-        // 限制：只搜索到一半 (Halfway point pruning)
-        // 简单策略：如果时间超过 horizon 的 0.6，停止扩展
-        if (curr.time > data.tw_end[0] * 0.6) continue; 
-
-        const auto& arcs = fwd_graph.nodes_outgoing_arcs[curr.node_id];
-        for (const auto& arc : arcs) {
-            int next = arc.target;
-            if (curr.visited_mask.test(next)) continue;
-            if (curr.load + arc.demand > data.vehicle_capacity) continue;
-
-            double arrival = curr.time + arc.duration;
-            if (arrival > data.tw_end[next]) continue;
-            double start_time = std::max(arrival, data.tw_start[next]);
-
-            // Reduced Cost: c_ij - dual_j
-            double rc = arc.cost - duals[next];
+        for (int curr_idx : current_bucket_indices) {
+            // 引用检查，必须用引用获取 active 状态，但拷贝数据用于计算
+            if (!label_pool[curr_idx].active) continue;
             
-            // 支配性检查 (此处省略，为了代码跑通先不做强支配)
-            
-            Label new_label = curr;
-            new_label.node_id = next;
-            new_label.parent_index = curr_idx;
-            new_label.cost += rc;
-            new_label.time = start_time;
-            new_label.load += arc.demand;
-            new_label.visited_mask = curr.visited_mask.apply_ng_relaxation(data.ng_masks[next], next);
-            new_label.active = true;
+            // 拷贝一份数据到栈上，避免 label_pool 扩容导致引用失效
+            const Label curr_label = label_pool[curr_idx]; 
 
-            int new_idx = (int)fwd_labels.size();
-            fwd_labels.push_back(new_label);
-            nodes_fwd_labels[next].push_back(new_idx);
-        }
-    }
-}
+            int i = curr_label.node_id;
+            // [修改] 使用 BucketGraph 的预处理弧进行遍历
+            // 这里的 arcs 已经是经过“容量”和“静态时间窗”过滤的
+            const auto& arcs = graph.nodes_outgoing_arcs[i];
+            for (const auto& arc : arcs) {
+                int j = arc.target;
 
-// ==========================================
-// 5. Backward Labeling (新增)
-// ==========================================
-void LabelingSolver::run_backward_labeling(const std::vector<double>& duals) {
-    Label root;
-    root.node_id = 0; // Depot
-    root.parent_index = -1;
-    root.cost = 0.0;
-    root.time = data.tw_end[0]; // 从最晚时间开始
-    root.load = 0;
-    root.visited_mask.set(0);
-    root.active = true;
+                // a. ng-Route 可行性检查 (保持不变)
+                if (curr_label.visited_mask.test(j)) continue;
 
-    bwd_labels.push_back(root);
-    nodes_bwd_labels[0].push_back(0);
+                // b. 资源检查 (简化版)
+                // 静态容量已经在 build 时检查过了，但在 Labeling 中累积容量仍需检查
+                int new_load = curr_label.load + arc.demand;
+                if (new_load > data.vehicle_capacity) continue;
 
-    int head = 0;
-    while(head < bwd_labels.size()) {
-        int curr_idx = head++;
-        const Label& curr = bwd_labels[curr_idx];
-        if (!curr.active) continue;
-        
-        // Backward Pruning: 时间小于 0.4 * Horizon 停止 (对应 Forward 的 0.6)
-        if (curr.time < data.tw_end[0] * 0.4) continue;
+                // 时间计算：直接使用预计算的 duration
+                double arrival = curr_label.time + arc.duration;
+                double start_time = std::max(arrival, data.tw_start[j]);
 
-        const auto& arcs = bwd_graph.nodes_outgoing_arcs[curr.node_id];
-        for (const auto& arc : arcs) {
-            int prev = arc.target; // 物理上的上游
-            if (curr.visited_mask.test(prev)) continue;
-            if (curr.load + arc.demand > data.vehicle_capacity) continue;
+                // [关键] 此时再做一次动态时间窗检查
+                // 虽然 build 时做了检查，但那是基于 i 的最早时间。
+                // 现在的 curr_label.time 可能比最早时间晚，所以必须检查。
+                if (start_time > data.tw_end[j]) continue;
 
-            // Backward Time Check
-            // 我们必须在 new_time 时刻到达 prev，才能赶上 curr.time
-            // new_time <= curr.time - travel(prev, curr) - service(prev)
-            double latest_start = curr.time - arc.duration; 
-            if (latest_start < data.tw_start[prev]) continue;
-            
-            // 确保不晚于 prev 的最晚结束
-            double execution_time = std::min(latest_start, data.tw_end[prev]);
+                // c. 计算 Cost (结合 Duals)
+                // Reduced Cost = arc.cost (distance) - duals[j]
+                double rc = arc.cost - duals[j];
+                double new_cost = curr_label.cost + rc;
+                
+                // d. 构造新掩码 (ng-relaxation 核心)
+                // NewMask = (OldMask & ng_mask[j]) | {j}
+                FastBitset new_mask = curr_label.visited_mask.apply_ng_relaxation(data.ng_masks[j], j);
 
-            // Reduced Cost: Backward 时，边的 cost 是 c_prev_curr
-            // Dual 扣在 prev 节点上 (除了 Depot)
-            // RC = c_prev_curr - dual_prev
-            double rc_val = arc.cost;
-            if (prev != 0) rc_val -= duals[prev];
+                // e. 构造临时 Label 用于支配性检查
+                Label temp_label;
+                temp_label.cost = new_cost;
+                temp_label.time = start_time;
+                temp_label.load = new_load;
+                temp_label.visited_mask = new_mask;
+                // node_id 和 parent 不需要参与支配检查
 
-            Label new_label = curr;
-            new_label.node_id = prev;
-            new_label.parent_index = curr_idx;
-            new_label.cost += rc_val;
-            new_label.time = execution_time;
-            new_label.load += arc.demand;
-            new_label.visited_mask = curr.visited_mask.apply_ng_relaxation(data.ng_masks[prev], prev);
-            new_label.active = true;
+                // f. 支配性检查 (Check + Clean)
+                if (check_and_update_dominance(j, temp_label)) {
+                    continue; // 被支配，跳过
+                }
 
-            int new_idx = (int)bwd_labels.size();
-            bwd_labels.push_back(new_label);
-            nodes_bwd_labels[prev].push_back(new_idx);
-        }
-    }
-}
+                // g. 添加新 Label
+                temp_label.node_id = j;
+                temp_label.parent_index = curr_idx;
+                temp_label.active = true;
 
-// ==========================================
-// 6. Merge and Collect (新增)
-// ==========================================
-std::vector<std::vector<int>> LabelingSolver::merge_and_collect(const std::vector<double>& duals) {
-    std::vector<std::pair<double, std::vector<int>>> merged_routes;
+                int new_idx = (int)label_pool.size();
+                label_pool.push_back(temp_label);
+                
+                // 加入支配集
+                dominance_sets[j].push_back(new_idx);
 
-    // 在每一个节点尝试接合
-    for (int i = 1; i < data.num_nodes; ++i) {
-        for (int f_idx : nodes_fwd_labels[i]) {
-            const Label& L_f = fwd_labels[f_idx];
-            
-            for (int b_idx : nodes_bwd_labels[i]) {
-                const Label& L_b = bwd_labels[b_idx];
-
-                // 1. 资源检查
-                if (L_f.load + L_b.load - data.demands[i] > data.vehicle_capacity) continue;
-                if (L_f.time > L_b.time + 1e-6) continue;
-
-                // 2. 环路检查 (Mask Intersection)
-                // 暂时简单处理：如果不相交则合并 (SOTA 需要更精细的位运算)
-                // 假设 FastBitset 已有 intersects 方法，或者这里暂时跳过强检查
-                // if (L_f.visited_mask.intersects(L_b.visited_mask, i)) continue;
-
-                // 3. Cost Calculation
-                // Total RC = Fwd.RC + Bwd.RC + dual[i]
-                // 解释：Fwd 累加了 -dual[i]，Bwd 也累加了 -dual[i] (因为它把 i 当作 target)
-                // 但实际上 i 只出现一次，所以要加回一个 dual[i]
-                double total_rc = L_f.cost + L_b.cost + duals[i];
-
-                if (total_rc < -1e-5) {
-                    // Reconstruct Path
-                    std::vector<int> path;
-                    
-                    // Add Forward part
-                    int curr = f_idx;
-                    while (curr != -1) {
-                        path.push_back(fwd_labels[curr].node_id);
-                        curr = fwd_labels[curr].parent_index;
-                    }
-                    std::reverse(path.begin(), path.end());
-                    
-                    // Add Backward part (skip the first one which is i, already added)
-                    curr = L_b.parent_index; 
-                    while (curr != -1) {
-                        path.push_back(bwd_labels[curr].node_id);
-                        curr = bwd_labels[curr].parent_index;
-                    }
-
-                    merged_routes.push_back({total_rc, path});
+                // 加入时间桶
+                int bucket_idx = (int)(start_time / bucket_step);
+                if (bucket_idx < buckets.size()) {
+                    buckets[bucket_idx].push_back(new_idx);
                 }
             }
         }
     }
 
-    // 排序并返回前 50 个
-    std::sort(merged_routes.begin(), merged_routes.end(), [](const auto& a, const auto& b){
-        return a.first < b.first;
-    });
-
-    std::vector<std::vector<int>> results;
-    int limit = std::min((int)merged_routes.size(), 50);
-    for(int k=0; k<limit; ++k) results.push_back(merged_routes[k].second);
+    // =======================
+    // 4. 收集结果 (回到 Depot)
+    // =======================
+    std::vector<std::pair<double, int>> best_labels;
     
+    // 遍历所有非 Depot 点
+    for(int i=1; i<data.num_nodes; ++i) {
+        for(int idx : dominance_sets[i]) {
+            const Label& L = label_pool[idx];
+            if (!L.active) continue;
+
+            double arrival_depot = L.time + data.service_times[i] + data.time_matrix[i][0];
+            if (arrival_depot <= data.tw_end[0]) {
+                double final_cost = L.cost + data.dist_matrix[i][0] - duals[0];
+                if (final_cost < -1e-5) {
+                    best_labels.push_back({final_cost, idx});
+                }
+            }
+        }
+    }
+
+    std::sort(best_labels.begin(), best_labels.end());
+    
+    // 限制返回路径数量 (Heuristic limit)
+    int limit = std::min((int)best_labels.size(), 50);
+    std::vector<std::vector<int>> results;
+
+    for(int k=0; k<limit; ++k) {
+        int idx = best_labels[k].second;
+        std::vector<int> path;
+        path.push_back(0);
+        
+        int curr = idx;
+        while(curr != -1) {
+            path.push_back(label_pool[curr].node_id);
+            curr = label_pool[curr].parent_index;
+        }
+        std::reverse(path.begin(), path.end());
+        results.push_back(path);
+    }
+
     return results;
-}
-
-
-std::vector<std::vector<int>> LabelingSolver::solve(const std::vector<double>& duals) {
-    // 清空上一轮状态
-    fwd_labels.clear();
-    bwd_labels.clear();
-    nodes_fwd_labels.assign(data.num_nodes, {});
-    nodes_bwd_labels.assign(data.num_nodes, {});
-
-    // 运行双向搜索
-    run_forward_labeling(duals);
-    run_backward_labeling(duals);
-
-    // 接合
-    return merge_and_collect(duals);
 }
