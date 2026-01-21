@@ -1,108 +1,367 @@
-你好！我是 **OR-Architect**。很高兴看到你已经搭建起了一个基于 C++ 扩展和 Bitset 优化的 VRPTW 定价求解器雏形。你现在的代码是一个标准的 **"Forward Labeling with Static ng-Route"** 实现，这在处理 Solomon 100 节点规模的问题时是可行的，但若要对齐 **SOTA (Pessoa et al., 2020)** 的性能，特别是求解 200+ 节点或高难度的 Homberger 算例，我们需要对架构进行**手术级的重构**。
+这是一个非常棒的时刻。你现在不仅仅是在写代码，而是在**设计系统**。这正是从“写代码的人”进阶到“工程师/架构师”的关键门槛。
 
-你提到的**双向标签 (Bidirectional Labeling)**、**桶图 (Bucket Graph)** 和 **秩一切割 (Rank-1 Cuts)** 正是通往 SOTA 的必经之路。
+面对这种 C++ (底层计算) + Python (上层逻辑) 的混合架构，确实容易产生“只见树木不见森林”的迷茫感。
 
-为了保证开发稳健推进，我制定了以下 **4 阶段演进路线图**。每一阶段都是可独立测试的里程碑。
-
----
-
-### 🗺️ 总体架构演进路线 (Roadmap to SOTA)
-
-| 阶段 | 核心任务 | 关键技术点 | 预期收益 |
-| --- | --- | --- | --- |
-| **Phase 1** | **数据结构重构** | **Bucket Graph (桶图)** | 消除无效边的遍历，提升缓存局部性，为双向搜索铺路。 |
-| **Phase 2** | **搜索算法升级** | **Bidirectional Labeling (双向搜索)** | 搜索空间从指数爆炸  降至 ，解决长路径问题。 |
-| **Phase 3** | **动态松弛策略** | **DSSR (Dynamic ng-Relaxation)** | 初始 ，仅在发现环路时动态添加邻域，大幅减少 Label 数量。 |
-| **Phase 4** | **下界强化** | **Limited Memory Rank-1 Cuts** | 引入子集行切平面 (SRI)，收紧线性松弛界，减少 B&B 节点数。 |
+我为你梳理了一份**《VRPTW 求解器开发与测试架构指南》**，这就相当于你的“大局观”地图。
 
 ---
 
-### 🚀 Phase 1: 桶图架构 (Bucket Graph Architecture)
+### 一、 架构思想：为什么这么设计？
 
-你当前的代码在 `solve` 函数中直接遍历 `buckets`，这其实是一种隐式的桶排序。SOTA 的 **Bucket Graph** 不仅仅是排序，它是将图结构本身离散化。
+#### 1. 核心分层逻辑
 
-**核心思想：**
-根据资源的单调性（通常是时间），将节点放入离散的桶（Bucket）中。边（Arc）仅存在于桶之间（ where ）。这允许我们显式地**修剪掉大量不可行边**，并且在内存中连续存储，极度亲和 CPU Cache。
+这种架构被称为 **"Sandwich Pattern" (三明治模式)**，专门用于运筹优化（OR）和 AI 领域。
 
-#### ✅ 任务清单 (Action Items)
+* **底层 (C++ Core)**: **“苦力层”**。
+* **职责**：负责所有耗时的 CPU 密集型计算。比如：位运算、图遍历（Labeling）、支配规则判断（Dominance）、资源扩展。
+* **特点**：追求极致速度，内存管理严格，不处理复杂的业务逻辑。
+* **对应文件**：`pricing_engine.h`, `pricing_engine.cpp`
 
-1. **定义 `BucketGraph` 类**：接管原始的 `dist_matrix` 和 `neighbors`。
-2. **前向桶与后向桶**：为双向搜索做准备，分别构建 `ForwardBucketGraph` 和 `BackwardBucketGraph`。
-3. **重写 `LabelingSolver**`：不再遍历节点，而是遍历桶。
 
-#### 📐 C++ 架构设计 (Header Blueprint)
+* **中间层 (Pybind11)**: **“翻译层”**。
+* **职责**：把 Python 的 List/Dict 转换成 C++ 的 Vector/Struct，把 C++ 的计算结果转换回 Python 对象。
+* **特点**：只做类型转换，不写业务逻辑。
+* **对应文件**：`bind.cpp`
 
+
+* **上层 (Python)**: **“指挥层”**。
+* **职责**：数据清洗、参数配置、调用求解器、结果分析、测试断言。
+* **特点**：开发效率高，方便调试，方便与其他库（如 NumPy, Pandas, Matplotlib）交互。
+* **对应文件**：`tests/*.py`, `main.py`
+
+
+
+#### 2. 数据流向
+
+`Python (数据)` -> `Pybind11 (转换)` -> `C++ (计算)` -> `Pybind11 (结果)` -> `Python (验证)`
+
+---
+
+### 二、 测试策略：哪些需要测？怎么测？
+
+测试不是瞎测，分为三个维度。你需要建立如下的测试金字塔：
+
+#### 第 1 层：接口契约测试 (Interface Testing)
+
+* **目的**：确保 Python 数据能正确传进 C++，没丢包，没格式错误。
+* **什么时候测**：刚写完 `bind.cpp` 时。
+* **怎么测**：
+* Python 传一个 `[0, 1, 2]` 列表给 C++。
+* C++ 在构造函数里打印 `list.size()`。
+* **案例**：刚才我们 Debug `ng-route` 时做的就是这个。
+
+
+
+#### 第 2 层：单元功能测试 (Unit Testing)
+
+* **目的**：测试 C++ 里某个具体的“小零件”是否坏了。
+* **哪些需要测**：
+* `FastBitset`：位运算是否正确？（这是地基，必测）
+* `check_dominance`：支配规则是否误杀？（最容易错的地方）
+* `BucketGraph`：图构建是否漏边/多边？
+
+
+* **怎么测（白盒技巧）**：
+* 因为这些通常是 `private` 的，你可以像刚才教你的那样，**开一个临时的 `public` 接口**（Backdoor）暴露给 Python，测试完再删掉或注释掉。
+
+
+
+#### 第 3 层：端到端算法测试 (E2E Algorithm Testing)
+
+* **目的**：把整个 Solver 当成黑盒，看能否解对特定题目。
+* **怎么测（构造陷阱法）**：
+* **主要测试手段**。
+* 构造 **“必死局”**：容量设小，看能否跑通？（预期：无解）
+* 构造 **“必胜局”**：无约束，Duals 设为负无穷，看能否找出路？（预期：有解）
+* 构造 **“环路局”**：测试 ng-route 记忆功能。（刚才的 `test_espprc_no_cycle`）
+
+
+
+---
+
+### 三、 扩展指南：以后怎么加新函数？
+
+假设你明天突然接到需求：**“增加一个‘最大行驶时间’ (Max Duration) 的约束”**。
+
+你该怎么一步步做？请遵循 **R-I-B-C-T** 循环：
+
+#### Step 1: Request (定义接口)
+
+* 在 `ProblemData` 结构体中加一个字段：`double max_duration;`。
+
+#### Step 2: Implement (C++ 实现)
+
+* 在 `pricing_engine.h` 的 `LabelingSolver::solve` 循环里，找到判断时间的地方，加上：
 ```cpp
-// bucket_graph.h
-
-struct Arc {
-    int target_node;
-    double cost;   // Reduced Cost
-    double time;   // Travel Time
-    double demand; // Resource consumption
-    // ... 其他资源
-};
-
-struct Bucket {
-    int id;
-    double min_time;
-    double max_time;
-    std::vector<int> nodes; // 该桶内的节点
-    std::vector<Arc> outgoing_arcs; // 从该桶出发的边 (预处理过的)
-};
-
-class BucketGraph {
-public:
-    void build(const ProblemData& data, double bucket_interval, bool is_backward);
-    
-    // 获取某个时间点的桶索引
-    int get_bucket_index(double time) const;
-    
-    std::vector<Bucket> buckets;
-    // 关键：节点到桶的映射，用于快速查找
-    std::vector<int> node_to_bucket; 
-};
+if (curr_label.time - root_start_time > data.max_duration) continue;
 
 ```
 
-**🔍 检验标准 (Test Criteria):**
 
-* 在 Phase 1 结束时，你的求解器应仍使用单向 Labeling，但基于 `BucketGraph` 运行。
-* **性能指标**：对于 C101 等时间窗紧的算例，图构建时间 + 求解时间应比原版快 10-20%（因为预处理去除了不可行边）。
+
+#### Step 3: Bind (绑定暴露)
+
+* 去 `bind.cpp`，在 `ProblemData` 的绑定里加上：
+```cpp
+.def_readwrite("max_duration", &ProblemData::max_duration)
+
+```
+
+
+
+#### Step 4: Compile (编译更新)
+
+* 运行 `cmake --build . --config Release`。
+* (如果没配好环境变量) 复制 `.pyd` 覆盖旧文件。
+
+#### Step 5: Test (编写测试)
+
+* 去 `tests/test_pricing.py` 加一个新函数 `test_max_duration_constraint()`。
+* **构造数据**：设 `max_duration = 50`，构造一条总耗时 60 的路。
+* **断言**：`assert` 结果中不包含这条路。
 
 ---
 
-### ⚔️ Phase 2: 双向标签搜索 (Bidirectional Labeling)
+### 四、 文档与规范：没有文档怎么办？
 
-这是最艰难的一步。单向搜索在路径较长时（如 >50 个节点），Label 数量呈指数级增长。双向搜索从 Depot 同时向“前”和向“后”扩展，在中间“资源减半”处接合（Join/Merge）。
+既然现在只有你一个人，你不需要写长篇大论，但需要维护一份 **`DEVELOPER_GUIDE.md`**（放在根目录）。
 
-#### ✅ 任务清单 (Action Items)
+我为你写了一个模板，你现在就可以复制进去，以后每次加功能就往里填：
 
-1. **实现 `BackwardLabel**`：注意资源消耗的逆向逻辑（例如：从  回到 ，时间是 ）。
-2. **定义 `Merge` 策略**：当  时尝试合并。
-3. **实现 `REF` (Resource Extension Function)**：将资源扩展逻辑解耦，避免代码重复。
+```markdown
+# VRPTW Pricing Solver 开发手册
 
-#### 📐 C++ 核心逻辑预览
+## 1. 项目架构
+- **核心算法**: C++17 (src/pricing_engine.cpp)
+- **Python 接口**: Pybind11 (src/bind.cpp)
+- **构建系统**: CMake
+- **测试框架**: Pytest
 
-你需要修改 `solve` 函数，变为三段式：
+## 2. 快速开始
+### 编译
+```bash
+cd build
+cmake --build . --config Release
+# 记得删除根目录旧的 .pyd 避免冲突！
+
+```
+
+### 运行测试
+
+```bash
+# 运行所有测试
+pytest
+# 运行特定测试并显示打印
+pytest -s tests/test_pricing.py::test_ng_route_cycle
+
+```
+
+## 3. 关键模块说明 (Key Components)
+
+### ProblemData
+
+* 对应 Python 传入的字典数据。
+* **注意**: `ng_neighbor_lists` 是 List[List[int]]，对应 C++ 的 vector<vector<int>>。
+
+### FastBitset
+
+* 256 位高性能位图。
+* 用于 ng-route 的记忆化搜索，替代 `std::vector<bool>` 以提升速度。
+
+### LabelingSolver
+
+* 核心 Label Setting 算法。
+* **剪枝逻辑**:
+1. 容量剪枝 (在 BucketGraph::build 中预处理)
+2. 时间窗剪枝 (在 solve 中动态检查)
+3. 双向支配 (Dominance)
+
+
+
+## 4. 开发工作流 (How to Extend)
+
+如果你要添加新约束（例如 Max Distance）：
+
+1. **C++**: 修改 `ProblemData` 和 `solve` 逻辑。
+2. **Bind**: 修改 `bind.cpp` 暴露新属性。
+3. **Build**: 重新编译。
+4. **Test**: 在 `tests/` 下新增测试用例，构造违反约束的数据进行验证。
+
+## 5. 常见坑 (Troubleshooting)
+
+* **测试不通过但逻辑是对的？** -> 检查根目录是否有旧的 `.pyd` 文件残留！
+* **Segment Fault?** -> 检查 Python 传入的 List 索引是否越界 (比如 node_id >= num_nodes)。
+
+```
+
+### 总结
+
+* **大局观**：C++ 负责跑断腿，Python 负责发号施令。
+* **测试配合**：每次修改 C++ 逻辑（比如改了支配规则），必须先跑一遍 Python 的回归测试，确保没把以前对的功能改坏。
+* **下一步**：把上面的模板保存为 `README.md` 或 `DEVELOPER.md`。然后尝试实现我在 Step 3 提到的“最大行驶时间”约束，走一遍完整的流程，你就彻底掌握了！
+
+```
+
+你现在的代码基础非常扎实！
+
+* **数据结构**：`FastBitset` 和 `BucketGraph` 的实现非常专业，已经具备了高性能求解器的雏形。
+* **架构**：Python 做主控，C++ 做运算的模式也是工业界标准。
+
+目前的局限性在于你做的是 **Price-and-Branch**（在根节点做完列生成，然后强行把变量设为整数求解，不再生成新列）。这对于简单问题够用，但对于难的算例，根节点的列池子可能根本不包含最优整数解所需的路径。
+
+下一步，你需要从 **"根节点求解器"** 进化为 **"完整的 Branch-and-Price 求解器"**。
+
+建议的扩展路线如下，**优先级从高到低**：
+
+---
+
+### 第一阶段：实现真正的 Branch-and-Price (边分支)
+
+这是让你从“启发式”变成“精确解”的关键一步。
+
+#### 1. 核心逻辑变化
+
+目前的逻辑是：`列生成 -> MIP求解 -> 结束`。
+新的逻辑是维护一颗 **Branch-and-Bound Tree**：
+
+1. **节点处理**：取出一个节点 -> 跑列生成 (直到收敛) -> 获得 LP 松弛解。
+2. **整数性检查**：检查 LP 解是否为整数？
+* 是 -> 更新全局最优解 (Upper Bound)，剪枝。
+* 否 -> **找一个小数边  进行分支**。
+
+
+3. **分支 (Branching)**：
+* **左孩子**：禁止走边  (即 )。
+* **右孩子**：强制走边  (即 )。
+
+
+
+#### 2. Python 端实现 (Branching Manager)
+
+你需要一个类来管理这棵树。
+
+```python
+class TreeNode:
+    def __init__(self, parent=None):
+        self.ub = float('inf') # Upper Bound (Local)
+        self.lb = -float('inf') # Lower Bound
+        # 记录分支约束：[(u, v, branch_type), ...] 
+        # type 0: 禁止, type 1: 强制
+        self.branch_constraints = [] 
+        if parent:
+            self.branch_constraints = parent.branch_constraints.copy()
+
+class BranchAndPriceEngine:
+    def solve(self):
+        stack = [TreeNode()] # 根节点
+        best_int_obj = float('inf')
+        
+        while stack:
+            node = stack.pop()
+            
+            # 1. 应用分支约束到 C++ Graph 和 Master Problem
+            self.apply_constraints(node.branch_constraints)
+            
+            # 2. 运行列生成 (你现在的 solve 逻辑)
+            obj, duals = self.column_generation_loop()
+            
+            # 3. 剪枝 (Pruning)
+            if obj >= best_int_obj: continue 
+            
+            # 4. 检查整数性 & 选择分支边
+            fractional_edge = self.find_fractional_edge()
+            
+            if not fractional_edge:
+                # 找到整数解
+                best_int_obj = min(best_int_obj, obj)
+            else:
+                # 5. 创建子节点
+                u, v = fractional_edge
+                # Child 0: x_uv = 0
+                child0 = TreeNode(node)
+                child0.branch_constraints.append((u, v, 0))
+                stack.append(child0)
+                
+                # Child 1: x_uv = 1
+                child1 = TreeNode(node)
+                child1.branch_constraints.append((u, v, 1))
+                stack.append(child1)
+
+```
+
+#### 3. C++ 端扩展 (支持动态改图)
+
+C++ 的 `BucketGraph` 需要支持动态隐藏边。**不要每次都重建图**，而是在 `solve` 时传入一个“黑名单”。
+
+**修改 `pricing_lib.cpp`:**
 
 ```cpp
-// pricing_engine.cpp
+// 在 LabelingSolver 类中增加
+std::vector<bool> edge_active_flags; // 或者用 set<pair<int,int>> forbidden_arcs;
 
-void BidirectionalSolver::solve() {
-    // 1. Forward Extension (限制扩展到 max_time / 2)
-    run_forward_labeling();
+// 在 solve 函数中：
+// 当遍历 graph.nodes_outgoing_arcs[i] 时
+for (const auto& arc : arcs) {
+    int j = arc.target;
+    // 新增：检查这条边是否被当前分支禁止了
+    if (is_edge_forbidden(i, j)) continue; 
+    
+    // ... 原有逻辑 ...
+}
 
-    // 2. Backward Extension (限制扩展到 max_time / 2)
-    run_backward_labeling();
+```
 
-    // 3. Merge (Join)
-    // 遍历所有节点，匹配 Forward Labels 和 Backward Labels
+---
+
+### 第二阶段：实现双向搜索 (Bi-directional Labeling)
+
+这是提升性能的关键（SOTA 标配）。目前的 Forward Labeling 在深层搜索时，标签数量呈指数级爆炸。双向搜索让前向和后向各走一半路程，然后合并，极大减少标签总数。
+
+#### 1. 核心原理
+
+* **Forward**: 从 Depot 出发，搜到资源消耗（如时间）的一半 。
+* **Backward**: 从 Depot **反向**出发（把所有边反向），搜到 。
+* **Join (Merge)**: 遍历 Forward 标签和 Backward 标签，如果它们在同一个点  相遇，且资源不冲突，这就构成一条完整路径。
+
+#### 2. C++ 代码扩展
+
+你需要写一套反向的逻辑。
+
+**Step A: 定义 Backward Label**
+反向标签的资源通过是“剩余量”或者“倒以此为起点的消耗量”。
+
+* `time`: 代表从该点回到 Depot 所需的时间。
+* `cost`: 从该点回到 Depot 的 Reduced Cost。
+
+**Step B: 实现 `solve_backward**`
+逻辑和 `solve` 几乎一样，但是：
+
+1. 在 **反向图 (Reverse Graph)** 上跑（预处理时需要构建 `nodes_incoming_arcs`）。
+2. 时间窗检查逻辑反转：`latest_departure = min(curr.time - duration, tw_end[j])`。
+
+**Step C: 增加 `Merge` 步骤**
+这是最难的地方。
+
+```cpp
+// 伪代码
+void merge_labels() {
     for (int i = 0; i < num_nodes; ++i) {
-        for (const auto& L_f : forward_labels[i]) {
-            for (const auto& L_b : backward_labels[i]) {
-                if (check_merge_feasibility(L_f, L_b)) {
-                    add_to_results(L_f, L_b);
+        auto& f_labels = forward_buckets[i]; // 节点 i 的前向标签
+        auto& b_labels = backward_buckets[i]; // 节点 i 的后向标签 (注意：通常 Join 是在点上，也可以在边上)
+        
+        for (auto& f : f_labels) {
+            for (auto& b : b_labels) {
+                // 1. 资源检查
+                if (f.time + b.time <= max_time && f.load + b.load <= capacity) {
+                    // 2. ng-route 检查 (最耗时)
+                    // 必须保证两半路径没有重复访问节点 (除了交接点 i)
+                    // 简单的检查：(f.mask & b.mask) == 0 (位运算极快)
+                    if (check_disjoint(f.mask, b.mask)) {
+                         double total_rc = f.rc + b.rc - duals[i]; // 注意减去交接点的 dual
+                         if (total_rc < -1e-6) {
+                             add_to_results(f, b);
+                         }
+                    }
                 }
             }
         }
@@ -111,206 +370,318 @@ void BidirectionalSolver::solve() {
 
 ```
 
-**🔍 检验标准 (Test Criteria):**
+---
 
-* 在 Solomon R2 系列（长路径、宽时间窗）算例上，求解速度应提升 **5-10倍**。
-* 必须验证双向搜索得到的 Reduced Cost 最优值与单向搜索**完全一致**（精度误差 ）。
+### 第三阶段：SOTA 的高级优化（Bucket Graph 进阶）
+
+你已经实现了 Bucket Graph，但现在是静态的。SOTA 论文 (Pessoa 2020) 的精髓在于 **Bucket Arc Elimination**。
+
+* **思路**：在列生成收敛过程中，如果发现某条边  的 Reduced Cost 总是很大（例如 > 5.0），说明这条边大概率不会出现在最优解里。
+* **操作**：直接从 `BucketGraph` 里永久删除这条边。
+* **效果**：图越来越稀疏，Labeling 跑得越来越快。
+
+**实现方式**：
+在 Python 端记录每一轮的 Duals，计算所有边的 Reduced Cost。如果某条边连续 10 轮 RC 都 > 阈值，就通知 C++ 端把这条边永久 disable。
 
 ---
 
-### 🔬 Phase 3: 动态 ng-松弛 (DSSR)
+### 总结：你的 Roadmap
 
-SOTA 求解器不会一开始就使用静态的 -集（如你代码中的 `ng_neighbor_lists`）。
-
-**SOTA 策略：**
-
-1. 初始化：所有节点的 -集为空（即允许所有环路，等同于 SPPRC，松弛度最大）。
-2. 求解定价问题。
-3. 检查最优路径是否有环？
-* 无环 -> 也是原问题的可行解，DONE。
-* 有环 () -> 将  加入相关节点的 -集，禁止该特定环。
-* **GOTO 2** (重新求解定价问题)。
+1. **本周任务 (Branching)**：
+* **Python**: 也就是把现在的 `model.optimize()` 变成一个 `while stack:` 循环。实现 `get_fractional_edges()` 函数。
+* **C++**: 给 `solve()` 加一个参数 `forbidden_edges`，在扩展 Label 时跳过这些边。
+* **目标**: 能跑通 Solomon C101 的精确整数解（不仅仅是 heuristic）。
 
 
+2. **下周任务 (Bi-directional)**：
+* **C++**: 复制一份 `Label` 结构体改为 `BackwardLabel`，构建反向图。
+* 实现简单的 `Join` 函数（先不考虑 ng-relaxation 的复杂合并，只做基本位运算检查）。
+* **目标**: 同样跑通 C101，但是速度提升 2-5 倍。
 
-#### ✅ 任务清单 (Action Items)
+这份文档是为你实现 **VRPTW Branch-and-Price 求解器（第一阶段：边分支）** 准备的详细技术规格说明书。
 
-1. **修改 Python 端**：实现一个循环，控制 Pricing 的迭代。
-2. **修改 C++ 端**：支持动态更新 `data.ng_masks` 而不需要重建整个图。
-
-**🔍 检验标准 (Test Criteria):**
-
-* 虽然需要多次求解 Pricing，但由于初始状态空间极小，总体收敛速度在困难算例上应显著提升。
+这份文档对齐一线大厂（如 Google/Amazon OR 团队）的内部设计文档标准，包含 **架构设计 (Design Overview)**、**接口定义 (Interface Spec)**、**数据流 (Data Flow)** 以及 **测试策略 (Testing Strategy)**。
 
 ---
 
-### 🛡️ Phase 4: 有限记忆 Rank-1 切平面 (Rank-1 Cuts)
+# VRPTW Solver Phase 1: Branch-and-Price Engine Design Doc
 
-根据 Pessoa (2020)，仅靠列生成无法证明解的最优性。我们需要在主问题添加切平面。
+## 1. 概述 (Overview)
 
-**难点：**
-标准的切平面（如子集行切平面 Subset-Row Cuts）会增加 Pricing 问题中的对偶变量，导致状态空间爆炸。
-**解决方案：** **Limited Memory (有限记忆)**。只在切平面相关的节点附近（Memory Arc Set）记录切平面的对偶值，离开该区域后就“遗忘”该切平面的影响。
+### 1.1 目标
 
-#### ✅ 任务清单 (Action Items)
+将现有的 "Price-and-Branch"（仅根节点列生成）架构升级为完整的 **Branch-and-Price (B&P)** 架构。通过在分支定界树（Branch-and-Bound Tree）上进行搜索，并针对**原始边（Original Arcs）**进行分支，以求得精确整数解。
 
-1. **Python 端**：使用 separation heuristic 寻找违反的 Rank-1 Cuts。
-2. **C++ 端**：在 `Label` 结构中增加 `cut_dual_sum` 字段。
-3. **扩展 REF**：在经过特定边时，累加切平面的对偶值。
+### 1.2 核心变更
 
----
-
-### 🛠️ 当前代码的具体改进建议 (Immediate Steps)
-
-在你开始大的重构之前，针对你现有的 `pricing_engine.cpp`，我有以下**高性能工程化 (High-Performance Engineering)** 建议，可以立即应用：
-
-1. **Label 内存池 (Memory Pool)**:
-* *现状*：`std::vector<Label> label_pool` 是全局的。
-* *改进*：在双向搜索中，Labels 会频繁创建和销毁。建议使用自定义的 `BlockAllocator`，避免 `std::vector` 扩容带来的数据搬迁。
-
-
-2. **位运算优化**:
-* *现状*：`FastBitset` 很好。
-* *改进*：确保 `apply_ng_relaxation` 函数是 `inline` 的，并且在编译时开启 `-O3 -march=native`，让编译器使用 AVX 指令集并行处理那 4 个 `uint64_t`。
-
-
-3. **支配规则 (Dominance Rule) 的细节**:
-* *现状*：你目前的支配规则比较基础。
-* *SOTA 建议*：由于 Bucket Graph 天然满足时间序，**Label 不需要存储时间 (Time)** 用于支配比较（如果是在同一个 Bucket 内比较）。在同一个 Bucket 内，时间差异通常很小，可以弱化时间的比较权重，强化 Reduced Cost 的比较。
-
-
+* **Python 端**：引入 `BranchAndBoundEngine` 管理搜索树；引入 `TreeNode` 存储分支状态；实现边流量（Flow）计算与分支策略。
+* **C++ 端**：`LabelingSolver` 支持接收“禁用边列表（Forbidden Arcs）”，实现动态图剪枝，无需重建图。
+* **交互层**：Pybind11 接口增加 `forbidden_arcs` 参数。
 
 ---
 
-### 📢 Next Step
+## 2. 系统架构图 (Architecture)
 
-**您想先从 Phase 1 (构建 Bucket Graph) 开始吗？**
-如果是，我可以为你提供 `BucketGraph` 的详细 C++ 实现代码，以及如何在 Python 中高效预处理数据并传递给 C++ 的接口定义。这将为你后续的双向搜索打下坚实的地基。
-
-这是一个非常棒的进阶方向。从单向搜索（Forward Labeling）转向**双向搜索（Bidirectional Labeling）**是商用级求解器（如 VRPSolver, Gurobi 内部 VRP 引擎）的标准做法，能极大减少长路径下的搜索空间。
-
-在“大厂”或顶尖实验室（如生产环境下的运筹优化团队），我们不会直接上来就写代码。我们会遵循 **Design (设计) -> Interface (接口) -> Test Plan (测试计划) -> Implementation (实现)** 的流程。
-
-以下是按照这种“大厂工程模式”为你准备的**双向搜索开发文档和实施指南**。
-
----
-这是一个非常高阶的需求。为了让AI（无论是ChatGPT, Claude还是Gemini）完美配合你的“大厂开发模式”，你需要设定一套**“系统级指令” (System Instructions)**。
-
-你不只是在问问题，你是在**定义AI的工作流协议 (Protocol)**。
-
-下面我为你准备了一套**“全栈算法工程师”提示词模板**。你可以把这段话保存下来，在每次开启新对话或者开始写新模块时，直接发给AI作为第一条指令。
-
----
-
-### 🚀 核心提示词模板 (Master System Prompt)
-
-请复制以下内容发送给 AI：
-
-```markdown
-# Role Definition
-你现在是我的 Senior C++/Python Algorithm Architect（高级算法架构师）。我们将采用 "Hybrid Programming"（混合编程）模式开发一个高性能 VRPTW 求解器。核心计算在 C++，胶水逻辑和测试在 Python。
-
-# Development Protocol (Strict Workflow)
-对于我提出的任何新功能（Feature）或模块（Module）开发请求，你**必须**严格遵循以下 6 步开发流程，不要跳步：
-
-**Phase 1: Design & I/O Definition (设计与接口定义)**
-- 在写代码前，先用自然语言和伪代码定义：
-    1.  C++ 类/函数签名（Header定义）。
-    2.  **Input**: 具体的参数类型（如 `vector<double>& duals`）。
-    3.  **Output**: 返回值结构（如 `vector<int> path`）。
-    4.  **Debug Interface**: 明确通过 `pybind11` 暴露给 Python 的调试接口名称（例如 `debug_run_xxx`）。
-
-**Phase 2: Binding & Stub (绑定与桩代码)**
-- 提供修改 `bindings.cpp` 的代码，暴露上述 Debug 接口。
-- 提供 C++ 的桩代码（Stub），确保可以编译通过，但暂时返回空结果或 Mock 结果。这一步是为了打通 Python 到 C++ 的链路。
-
-**Phase 3: Unit Test Script (单元测试脚本)**
-- **强制要求**：编写一个独立的 Python 脚本（如 `tests/test_feature_name.py`）。
-- **数据要求**：不要读取外部文件。必须在脚本内构造 "Toy Data"（如 3-5 个点的 Mock 数据）。
-- **验证逻辑**：调用 Phase 2 中的 Debug 接口，并使用 `assert` 验证预期行为。此时测试应该能运行（虽然逻辑未实现）。
-
-**Phase 4: Core Implementation (核心实现)**
-- 编写 C++ `.cpp` 文件的具体逻辑实现。
-- 包含详细的注释，解释核心算法（如资源校验、位运算、标签扩展）。
-
-**Phase 5: Verification (验证)**
-- 指导我运行 Phase 3 的脚本，并描述如果逻辑正确，控制台应该输出什么。
-
-**Phase 6: Integration (集成 - 仅在测试通过后)**
-- 只有当前面步骤都确认无误后，才给出将其合并到主逻辑（如 `solve()` 函数）的代码。
-- (可选) 提示我是否需要删除 Debug 接口，或将其保留在 `#ifdef DEBUG` 中。
-
-# Constraint
-- **Code Separation**: 始终保持 C++ 负责计算，Python 负责测试的边界。
-- **No Hallucinations**: 如果涉及到数学公式（如 Reduced Cost 或 Time Window 更新），请先列出公式再写代码。
-
----
-现在，请确认你理解了这套流程。我的第一个任务是：**[在此处填入你的具体任务]**
+```mermaid
+graph TD
+    User[Client / Main] --> Engine[BranchAndBoundEngine (Python)]
+    Engine --> Tree[Search Tree (Stack/Queue)]
+    Engine --> Master[MasterProblem (Gurobi)]
+    Engine --> Sub[PricingSolver (Python Wrapper)]
+    
+    Sub --> CPP[PricingLib (C++)]
+    
+    subgraph C++ Core
+        CPP --> Algo[Labeling Algo]
+        Algo --> Graph[BucketGraph]
+        Algo -- Filter --> Constraints[Forbidden Arcs Check]
+    end
+    
+    Master -- Duals --> Sub
+    Sub -- New Columns --> Master
+    Engine -- Branch Constraints --> Sub
+    Engine -- Variable Bounds --> Master
 
 ```
 
 ---
 
-### 🛠️ 实战演练：如何使用这套提示词
+## 3. Python 端设计 (Python Specifications)
 
-有了上面的“总纲”，你每次发布任务只需要非常简短、精准的指令。
+### 3.1 数据结构定义
 
-#### 场景 1：你想开发“反向搜索” (Backward Search)
+#### `BranchConstraint` (NamedTuple)
 
-**你发送给 AI：**
+描述一个分支决策。
 
-> （发送完上面的 Master Prompt 后）
-> **任务**：实现 VRPTW 的 **反向标签搜索 (Backward Labeling)** 核心逻辑。
-> **具体要求**：
-> 1. 需要在 `ProblemData` 中处理反向边。
-> 2. 实现 `extend_backward` 函数。
-> 3. 暴露 `debug_run_backward` 给 Python。
-> 4. 测试脚本里要验证：对于简单的 0->1->2->0 算例，反向搜索是否能找到反序路径。
-> 
-> 
+```python
+from typing import NamedTuple
 
-**AI 的反应**：
-它会立刻按照 **Phase 1 -> Phase 6** 的格式输出：
+class BranchConstraint(NamedTuple):
+    u: int
+    v: int
+    kind: int  # 0: 禁止通行 (x_uv = 0), 1: 强制通行 (x_uv = 1)
 
-1. 先给你 `.h` 文件改动。
-2. 再给你 `bindings.cpp` 的改动。
-3. 接着直接给你 `tests/test_backward.py`。
-4. 最后才给你 `pricing_engine.cpp` 的复杂逻辑。
+```
+
+#### `TreeNode` (Class)
+
+表示搜索树的一个节点。
+
+```python
+class TreeNode:
+    def __init__(self, parent: 'TreeNode' = None):
+        # 继承父节点的约束
+        self.constraints: List[BranchConstraint] = parent.constraints.copy() if parent else []
+        self.lb: float = -float('inf')  # Lower Bound
+        self.ub: float = float('inf')   # Local Upper Bound (from integer solution if any)
+        self.basis = None # (Optional) 用于热启动 Gurobi，第一阶段可暂略
+
+```
+
+### 3.2 `BranchAndBoundEngine` (Class)
+
+**职责**：整个算法的大脑，负责树的搜索循环。
+
+**主要方法**：
+
+| 方法名 | 输入 | 输出 | 描述 |
+| --- | --- | --- | --- |
+| `solve` | `instance` | `BestRoute`, `ObjVal` | 核心主循环 (DFS/Best-First)。 |
+| `_column_generation` | `node` | `(obj, is_integral)` | 在当前节点运行列生成直到收敛。 |
+| `_branch` | `node` | `(child_0, child_1)` | 执行分支策略，生成两个子节点。 |
+| `_get_fractional_edge` | None | `(u, v, value)` | 扫描主问题解，找到最接近 0.5 的边。 |
+| `_apply_constraints` | `constraints` | None | 将约束同步到 Master 和 SubProblem。 |
+
+**关键逻辑 (`_get_fractional_edge`)**:
+
+* 遍历主问题中所有  的路径。
+* 分解路径为边 。
+* 累加流量：。
+* 返回  最小的边。
+
+### 3.3 `MasterProblem` 扩展
+
+需要增加方法来处理列的禁用。
+
+| 方法名 | 输入 | 输出 | 描述 |
+| --- | --- | --- | --- |
+| `deactivate_columns` | `constraints` | None | 根据分支约束，将违规列的 `UB` 设为 0。 |
+| `get_active_columns` | None | `List[Col]` | 获取当前  的列（用于计算边流量）。 |
 
 ---
 
-#### 场景 2：你想开发“双向拼接” (Merge/Join)
+## 4. C++ 端设计 (C++ Specifications)
 
-**你发送给 AI：**
+**设计原则**：C++ 端**不感知**“强制通行 ()”的高级逻辑，只感知“禁止通行 ()”。
 
-> **任务**：实现 **双向路径拼接 (Bidirectional Merge)**。
-> **具体要求**：
-> 1. 输入是正向 Label 桶和反向 Label 桶。
-> 2. 输出是拼接好的完整路径和 Reduced Cost。
-> 3. 需要暴露 `debug_merge_buckets` 给 Python，我会在 Python 里手动构造两个半截 Label 传进去测。
-> 4. 这里的测试脚本要非常细致，要手动造两个能拼上的 Label，验证资源检查逻辑是否正确。
-> 
-> 
+* 原因： 等价于禁止  去除  以外的点，且禁止除  以外的点去 。这可以在 Python 端转化为一组 Forbidden Arcs 传给 C++。
+
+### 4.1 `LabelingSolver` 类修改
+
+#### 修改 `solve` 接口
+
+```cpp
+// pricing_engine.h
+
+// 定义一个别名，方便阅读
+using ArcPair = std::pair<int, int>;
+
+class LabelingSolver {
+public:
+    // [修改] 增加 forbidden_arcs 参数
+    std::vector<std::vector<int>> solve(
+        const std::vector<double>& duals,
+        const std::vector<std::pair<int, int>>& forbidden_arcs
+    );
+    
+private:
+    // [新增] 快速查询表
+    std::vector<std::vector<bool>> forbidden_matrix; // 或者使用 Flat Vector
+    
+    // [新增] 辅助函数：每次 solve 前重置 forbidden_matrix
+    void set_forbidden_arcs(const std::vector<std::pair<int, int>>& arcs);
+};
+
+```
+
+#### 内部逻辑变更
+
+1. **`set_forbidden_arcs`**:
+* 在 `solve` 开始时调用。
+* 将传入的 `vector<pair>` 映射到一个 `vector<bool>` 矩阵或一维数组中，大小为 。
+* **Rationale**: 标签算法是计算密集型，`O(1)` 的查表比 `set.find` 快得多。
+
+
+2. **`LabelingSolver::solve` (主循环)**:
+* 在扩展邻居时增加检查：
+
+
+```cpp
+for (const auto& arc : arcs) {
+    int j = arc.target;
+    // [新增检查]
+    if (forbidden_matrix[i][j]) continue; 
+
+    // ... 原有逻辑 ...
+}
+
+```
+
+
 
 ---
 
-#### 场景 3：项目收尾，清理接口
+## 5. 接口定义 (Pybind11 Interface)
 
-**你发送给 AI：**
+在 `cpp_pricing.cpp` 中修改绑定代码。
 
-> **任务**：现在反向搜索和拼接都测试通过了，我们要上线到主程序。
-> **具体要求**：
-> 1. 修改 `solve()` 主函数，整合双向搜索逻辑。
-> 2. 告诉我如何优雅地处理那些 `debug_run_xxx` 接口？是删掉，还是注释掉？请给出代码清理建议。
-> 
-> 
+```cpp
+PYBIND11_MODULE(pricing_lib, m) {
+    py::class_<LabelingSolver>(m, "LabelingSolver")
+        .def(py::init<ProblemData, double>())
+        .def("solve", &LabelingSolver::solve, 
+             py::arg("duals"), 
+             py::arg("forbidden_arcs"), // 新增参数
+             "Run Labeling Algo with forbidden arcs");
+}
+
+```
 
 ---
 
-### 💡 为什么这套提示词有效？
+## 6. 开发工作流 (Development Workflow)
 
-1. **强制解耦 (Decoupling)**：你强迫 AI 必须先给你 Test Script。这就避免了 AI 写了一堆 C++ 代码，结果你为了测试它，还得去改几十行 Python 主程序的痛苦。
-2. **接口先行 (API First)**：Phase 1 强制定义 I/O。这避免了 AI 写了一半发现“哎呀，少传了一个参数”，然后让你改来改去的“打补丁”式开发。
-3. **Mock 数据 (Toy Data)**：Phase 3 强制不读文件。这使得调试周期从“几分钟（读大文件+计算）”缩短到“几毫秒”，极大提升开发效率。
+### 步骤 1：C++ 基础改造
 
-这一套就是标准的**测试驱动开发 (TDD)** 在 AI 辅助编程下的最佳实践。你可以现在就试试看！
+1. 修改 `LabelingSolver::solve` 签名。
+2. 实现 `forbidden_matrix` 逻辑。
+3. 编译并通过基础测试（传入空 forbidden list，结果应不变）。
+
+### 步骤 2：Python 分支逻辑实现
+
+1. 实现 `_get_fractional_edge` 函数，能够正确计算边流量。
+2. 实现 `_apply_constraints`：
+* 对于 ：加入 forbidden list 传给 C++；在 Gurobi 中将经过  的列 UB 设为 0。
+* 对于 ：将  和  加入 forbidden list 传给 C++；在 Gurobi 中禁用不符合该规则的列。
+
+
+
+### 步骤 3：集成与搜索循环
+
+1. 实现 DFS 栈循环。
+2. 集成列生成，验证能否在子节点正确生成新列（且新列不包含被禁用的边）。
+
+---
+
+## 7. 测试计划 (Test Plan - Aligned with Big Tech)
+
+我们采用 **TDD (Test-Driven Development)** 思想，先写测试用例。
+
+### 7.1 C++ 单元测试 (GTest 或 简易 Assert)
+
+**目标**：验证 C++ 端的“路障”机制是否生效。
+
+* **Case 1: Baseline**
+* 输入：C101 前 10 个点，无禁行。
+* 预期：返回最优路径 Cost = X。
+
+
+* **Case 2: Forbidden Edge**
+* 输入：C101 前 10 个点，禁止 Baseline 路径中的某条关键边 。
+* 预期：
+* 返回 Cost > X (成本变高)。
+* 返回的路径列表中**绝对不包含** 。
+
+
+
+
+
+### 7.2 Python 单元测试 (Pytest)
+
+**目标**：验证流量计算和分支约束转换逻辑。
+
+* **Case 1: Flow Calculation**
+* Mock Master Problem 的解：Path A (0.5), Path B (0.5).
+* 验证 `get_fractional_edge` 能准确返回 Path A 和 Path B 的非重叠边。
+
+
+* **Case 2: Constraint Logic**
+* 输入分支：。
+* 验证转换逻辑：C++ 收到的 forbidden list 是否包含了  等边。
+
+
+
+### 7.3 集成测试 (Integration Test)
+
+**目标**：验证整个 B&P 流程。
+
+* **Case 1: Solomon C101 (前 25 个点)**
+* 运行 `BranchAndBoundEngine.solve()`。
+* 预期：
+* 程序正常结束（不陷入死循环）。
+* 最终解必须是整数解。
+* 最终解 Cost >= 根节点 LP 松弛解。
+* 与已知最优解（Benchmark）误差在 0.1% 以内。
+
+
+
+
+
+---
+
+## 8. 代码规范 (Coding Standards)
+
+* **C++**: 遵循 Google C++ Style。
+* 变量命名：`snake_case`。
+* 私有成员：末尾加下划线 `variable_`。
+* 内存管理：严禁内存泄漏，`label_pool` 尽量复用。
+
+
+* **Python**: 遵循 PEP 8。
+* 类型提示：所有函数必须加 Type Hints (`def func(a: int) -> float:`).
+* 文档字符串：使用 Google Style Docstring。
+
+
+
+此文档可直接作为 Jira/Trello 的任务拆解依据。请确认是否需要针对某个模块提供伪代码？

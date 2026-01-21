@@ -1,0 +1,14 @@
+[
+{
+  "directory": "D:/cs_course/or_comptetion/VRPTW-ALNS-main/my_vrp_solve/build",
+  "command": "\"D:\\software\\MSVC C++\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DPy_NO_LINK_LIB -Dpricing_lib_EXPORTS -ID:\\cs_course\\or_comptetion\\VRPTW-ALNS-main\\my_vrp_solve\\cpp_src -external:ID:\\python\\Include -external:ID:\\python\\Lib\\site-packages\\pybind11\\include -external:W0 /DWIN32 /D_WINDOWS /W3 /GR /EHsc /MDd /Zi /Ob0 /Od /RTC1 -std:c++17 /O2 /utf-8 /EHsc /W3 /bigobj /FoCMakeFiles\\pricing_lib.dir\\cpp_src\\bind.cpp.obj /FdCMakeFiles\\pricing_lib.dir\\ /FS -c D:\\cs_course\\or_comptetion\\VRPTW-ALNS-main\\my_vrp_solve\\cpp_src\\bind.cpp",
+  "file": "D:/cs_course/or_comptetion/VRPTW-ALNS-main/my_vrp_solve/cpp_src/bind.cpp",
+  "output": "D:/cs_course/or_comptetion/VRPTW-ALNS-main/my_vrp_solve/build/CMakeFiles/pricing_lib.dir/cpp_src/bind.cpp.obj"
+},
+{
+  "directory": "D:/cs_course/or_comptetion/VRPTW-ALNS-main/my_vrp_solve/build",
+  "command": "\"D:\\software\\MSVC C++\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DPy_NO_LINK_LIB -Dpricing_lib_EXPORTS -ID:\\cs_course\\or_comptetion\\VRPTW-ALNS-main\\my_vrp_solve\\cpp_src -external:ID:\\python\\Include -external:ID:\\python\\Lib\\site-packages\\pybind11\\include -external:W0 /DWIN32 /D_WINDOWS /W3 /GR /EHsc /MDd /Zi /Ob0 /Od /RTC1 -std:c++17 /O2 /utf-8 /EHsc /W3 /bigobj /FoCMakeFiles\\pricing_lib.dir\\cpp_src\\pricing_engine.cpp.obj /FdCMakeFiles\\pricing_lib.dir\\ /FS -c D:\\cs_course\\or_comptetion\\VRPTW-ALNS-main\\my_vrp_solve\\cpp_src\\pricing_engine.cpp",
+  "file": "D:/cs_course/or_comptetion/VRPTW-ALNS-main/my_vrp_solve/cpp_src/pricing_engine.cpp",
+  "output": "D:/cs_course/or_comptetion/VRPTW-ALNS-main/my_vrp_solve/build/CMakeFiles/pricing_lib.dir/cpp_src/pricing_engine.cpp.obj"
+}
+]

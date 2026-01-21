@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\cs_course\or_comptetion\VRPTW-ALNS-main\my_vrp_solve\build\CMakeFiles\da40fa593b09c450b0a44395df35ef2f\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{C5CE2BE2-5F0D-3A4F-ABF4-40F77944369A}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

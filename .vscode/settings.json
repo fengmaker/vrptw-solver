@@ -1,0 +1,18 @@
+{
+    // 1. 让 Pylance (IntelliSense) 能够识别 build/Release 下的库
+    "python.analysis.extraPaths": [
+        "./build/Release",
+        "./build/Debug"  // 备用，万一你用了 Debug 模式
+    ],
+
+    // 2. 让 VS Code 的内置终端自动设置 PYTHONPATH
+    // 这样你在终端里直接 python xxx.py 就能 import 成功，不需要手动复制 pyd 文件了
+    "terminal.integrated.env.windows": {
+        "PYTHONPATH": "${workspaceFolder}/build/Release;${env:PYTHONPATH}"
+    },
+    
+    // (可选) 如果你是 Linux/Mac，解开下面这行
+    // "terminal.integrated.env.linux": {
+    //     "PYTHONPATH": "${workspaceFolder}/build:${env:PYTHONPATH}"
+    // }
+}
