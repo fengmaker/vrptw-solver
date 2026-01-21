@@ -1,0 +1,5 @@
+Instance,Time(s),Status,Total_Obj,Pure_Dist,BKS_Dist,Gap_Pct,Trucks,BKS_Trucks
+C101,2.63,Optimal,20828.94,828.94,828.94,-0.00%,10,10
+C102,4.25,Optimal,20828.94,828.94,828.94,-0.00%,10,10
+R101,10.24,TimeLimit,39676.3,1676.3,1607.7,4.27%,19,19
+R102,0.85,Optimal,35487.68,1487.68,1468.4,1.31%,17,17

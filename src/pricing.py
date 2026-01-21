@@ -39,7 +39,7 @@ class PricingSolver:
         cpp_data.dist_matrix = instance.dist_matrix
         # 兼容性处理：如果没有 time_matrix，复用 dist_matrix
         cpp_data.time_matrix = getattr(instance, 'time_matrix', instance.dist_matrix)
-        ng_size = 10 
+        ng_size = 8
         ng_lists = []
 
         for i in range(instance.num_nodes):
@@ -108,17 +108,51 @@ class PricingSolver:
         # =========================================
         # 3. 初始化 C++ 求解器
         # =========================================
-        # Bucket Step: 建议设为平均旅行时间的一半，例如 10.0
-        self.cpp_solver = pricing_lib.LabelingSolver(cpp_data, 10.0)
-
-    def solve(self, duals: List[float]) -> List[Route]:
+        self.cpp_data = cpp_data
+        # [修改] 设置默认参数 (漏斗初始阶段：快)
+        self.bucket_step = 1.0  # 默认步长 (建议 1.0 或 2.0 用于快速探测)
+        self.limit = 50         # 默认截断数量
+        
+        self.cpp_solver = None
+        self._init_solver()
+        
+    # [新增] 辅助函数：初始化/重建 C++ 求解器
+    def _init_solver(self):
+        # 销毁旧对象（如果有），创建新对象
+        # 注意：C++ 侧会重新构建 BucketGraph，但这通常只需要几毫秒
+        self.cpp_solver = pricing_lib.LabelingSolver(self.cpp_data, self.bucket_step)
+    # [新增] 漏斗机制的核心接口
+    def set_params(self, bucket_step=None, limit=None):
+        """
+        动态调整策略参数
+        """
+        rebuild_needed = False
+        
+        # 如果提供了新的 bucket_step 且与当前不同，标记需要重建
+        if bucket_step is not None and abs(bucket_step - self.bucket_step) > 1e-6:
+            self.bucket_step = bucket_step
+            rebuild_needed = True
+            
+        # 更新截断限制
+        if limit is not None:
+            self.limit = limit
+            
+        # 如果步长变了，执行重建
+        if rebuild_needed:
+            self._init_solver()
+            
+    def solve(self, duals: List[float],forbidden_arcs: List[Tuple[int, int]] = []) -> List[Route]:
         """
         调用 C++ 引擎求解
         """
         # 1. C++ 求解
-        raw_paths = self.cpp_solver.solve(duals)
+        raw_paths = self.cpp_solver.solve(duals, forbidden_arcs)
         results = []
-        
+        # [新增] Python 端截断 (漏斗机制生效点)
+        # 假设 C++ 返回了较多列 (e.g. 500)，这里根据当前策略只取前 limit 个 (e.g. 50)
+        if len(raw_paths) > self.limit:
+            # 假设 C++ 已经按 RC 排序，直接切片
+            raw_paths = raw_paths[:self.limit]
         # 2. 后处理
         for path in raw_paths:
             # 计算成本

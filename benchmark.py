@@ -1,59 +1,73 @@
 import os
 import csv
 import time
-import argparse
 from datetime import datetime
 from src.instance import VRPTWInstance
-from src.solver import CGSolver
+from src.branching import BranchAndBoundEngine # <--- 改用 B&P 引擎
 
 # ==========================================
-# 1. Solomon 100 节点 Best Known Solutions (BKS)
-#    格式: "InstanceName": (Distance, Vehicles)
+# 1. 配置区域 (在这里修改测试列表)
+# ==========================================
+TARGET_INSTANCES = [
+    "C101", "C102",
+    "R101", "R102",
+    # "RC101", "RC102" 
+]
+
+# 每个算例的最大运行时间 (秒)
+GLOBAL_TIME_LIMIT = 10
+
+# 车辆固定成本 (用于还原纯距离)
+VEHICLE_FIXED_COST = 2000.0
+
+# ==========================================
+# 2. Solomon 100 节点 BKS
 # ==========================================
 SOLOMON_BKS = {
-    # C1 Series (Clustered)
+    # C1 Series
     "C101": (828.94, 10), "C102": (828.94, 10), "C103": (828.06, 10),
     "C104": (824.78, 10), "C105": (828.94, 10), "C106": (828.94, 10),
     "C107": (828.94, 10), "C108": (828.94, 10), "C109": (828.94, 10),
-    # R1 Series (Random)
+    # R1 Series
     "R101": (1607.7, 19), "R102": (1468.4, 17), "R103": (1208.7, 13),
     "R104": (971.5, 9),   "R105": (1355.3, 14), "R106": (1234.6, 12),
     "R107": (1064.6, 10), "R108": (932.1, 9),   "R109": (1146.9, 11),
     "R110": (1068.0, 10), "R111": (1048.7, 10), "R112": (953.63, 9),
-    # RC1 Series (Mixed)
+    # RC1 Series
     "RC101": (1619.8, 14), "RC102": (1457.4, 12), "RC103": (1258.0, 11),
     "RC104": (1132.3, 10), "RC105": (1513.7, 13), "RC106": (1365.6, 11),
     "RC107": (1207.8, 11), "RC108": (1114.2, 10)
 }
 
-def run_benchmark(target_instances, data_dir="data", output_dir="result/benchmark_csv"):
-    # 1. 准备输出目录
+def run_benchmark(data_dir="data", output_dir="result/benchmark_bnb"):
+    # 1. 准备输出
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    # 生成带时间戳的文件名，防止覆盖
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_filename = os.path.join(output_dir, f"benchmark_{timestamp}.csv")
+    csv_filename = os.path.join(output_dir, f"bnb_results_{timestamp}.csv")
     
-    # 2. 定义 CSV 表头 (按照你的要求排序)
+    # 2. 定义表头
     headers = [
         "Instance", 
-        "Time",
-        "Obj", "BKS_Obj", 
-        "Gap_Pct", 
-        "Trucks", "BKS_Trucks", 
-        "Truck_Diff", 
+        "Time(s)",
+        "Status",       # Optimal / Feasible / Infeasible
+        "Total_Obj",    # 含固定成本
+        "Pure_Dist",    # 纯距离 (Obj - 2000*k)
+        "BKS_Dist",     # 已知最优距离
+        "Gap_Pct",      # (Pure - BKS)/BKS
+        "Trucks", 
+        "BKS_Trucks"
     ]
     
     results = []
     
-    print(f"🚀 Starting Benchmark on {len(target_instances)} instances...")
-    print(f"📂 Reading data from: {data_dir}")
-    print("-" * 60)
+    print(f"🚀 Starting B&P Benchmark on {len(TARGET_INSTANCES)} instances...")
+    print(f"⏱️  Time Limit per instance: {GLOBAL_TIME_LIMIT}s")
+    print("-" * 80)
 
-    # 3. 循环运行测试
-    for name in target_instances:
-        # 兼容处理：如果用户输入 "C101.txt" 或 "data/C101.txt"，自动提取 "C101"
+    # 3. 循环运行
+    for name in TARGET_INSTANCES:
         base_name = os.path.basename(name).split('.')[0]
         file_path = os.path.join(data_dir, f"{base_name}.txt")
         
@@ -61,50 +75,76 @@ def run_benchmark(target_instances, data_dir="data", output_dir="result/benchmar
             print(f"❌ Error: File not found {file_path}")
             continue
             
-        print(f"running {base_name}...", end=" ", flush=True)
+        print(f"Running {base_name}...", end=" ", flush=True)
         
         try:
-            # --- 核心求解过程 ---
-            # verbose=False 关闭求解器内部的大量打印，保持 Benchmark 界面整洁
+            # --- 加载数据 ---
+            # verbose=False: 关闭详细的列生成日志，只保留关键信息
             instance = VRPTWInstance(file_path, verbose=False)
-            solver = CGSolver(instance, verbose=False) 
             
+            # --- 初始化 B&P 引擎 ---
+            bnb_engine = BranchAndBoundEngine(instance, verbose=False)
+            
+            # --- 计时开始 ---
             start_time = time.perf_counter()
-            obj, routes = solver.run()
+            
+            # 调用 solve，传入时间限制
+            final_obj, final_routes = bnb_engine.solve(global_time_limit=GLOBAL_TIME_LIMIT)
+            
             end_time = time.perf_counter()
-            
             run_time = end_time - start_time
-            num_trucks = len(routes)
             
-            # --- BKS 对比计算 ---
-            bks_obj, bks_trucks = SOLOMON_BKS.get(base_name, (0, 0))
+            # --- 数据处理 ---
+            num_trucks = len(final_routes)
             
-            # Gap 计算 ( (Obj - BKS) / BKS )
-            if bks_obj > 0:
-                gap_pct = (obj - bks_obj) / bks_obj * 100
-            else:
-                gap_pct = 0.0
+            if final_routes and final_obj < float('inf'):
+                # 成功找到解
+                status = "Optimal" # 或者 Feasible (如果是因为超时停止的)
+                if run_time > GLOBAL_TIME_LIMIT:
+                    status = "TimeLimit"
                 
-            truck_diff = num_trucks - bks_trucks if bks_trucks > 0 else 0
+                # 计算纯距离
+                pure_dist = final_obj - (num_trucks * VEHICLE_FIXED_COST)
+                
+                # 获取 BKS
+                bks_dist, bks_trucks = SOLOMON_BKS.get(base_name, (0, 0))
+                
+                # 计算 Gap
+                if bks_dist > 0:
+                    gap_pct = (pure_dist - bks_dist) / bks_dist * 100
+                else:
+                    gap_pct = 0.0
+                
+                # 打印单行结果摘要
+                print(f"✅ Done. Dist: {pure_dist:.2f} (Gap: {gap_pct:.2f}%) | Time: {run_time:.2f}s")
             
-            # --- 记录数据 ---
+            else:
+                # 无解
+                status = "Infeasible"
+                pure_dist = float('inf')
+                gap_pct = float('inf')
+                bks_dist, bks_trucks = SOLOMON_BKS.get(base_name, (0, 0))
+                print(f"⚠️ No Solution Found.")
+
+            # --- 记录 ---
             row = {
                 "Instance": base_name,
-                "Time": round(run_time, 2),
-                "Obj": round(obj, 2),
-                "BKS_Obj": bks_obj,
-                "Gap_Pct": f"{gap_pct:.2f}%", # 格式化为百分比字符串
+                "Time(s)": round(run_time, 2),
+                "Status": status,
+                "Total_Obj": round(final_obj, 2) if final_obj < float('inf') else "inf",
+                "Pure_Dist": round(pure_dist, 2) if pure_dist < float('inf') else "inf",
+                "BKS_Dist": bks_dist,
+                "Gap_Pct": f"{gap_pct:.2f}%" if gap_pct < float('inf') else "inf",
                 "Trucks": num_trucks,
-                "BKS_Trucks": bks_trucks,
-                "Truck_Diff": truck_diff,
+                "BKS_Trucks": bks_trucks
             }
-                
             results.append(row)
-            print(f"Done. (Obj: {obj:.2f}, Time: {run_time:.2f}s)")
             
         except Exception as e:
-            print(f"Failed! Error: {e}")
-            
+            print(f"\n❌ Crashed! Error: {e}")
+            import traceback
+            traceback.print_exc()
+
     # 4. 写入 CSV
     if results:
         with open(csv_filename, mode='w', newline='') as f:
@@ -112,28 +152,18 @@ def run_benchmark(target_instances, data_dir="data", output_dir="result/benchmar
             writer.writeheader()
             writer.writerows(results)
             
+        print("-" * 80)
+        print(f"📊 Benchmark Summary saved to: {csv_filename}")
+        print("-" * 80)
+        
+        # 打印漂亮的控制台表格
+        print(f"{'Instance':<10} {'Dist':<10} {'BKS':<10} {'Gap':<10} {'Time':<10} {'Veh':<5}")
         print("-" * 60)
-        print(f"✅ Benchmark Complete. Results saved to: {csv_filename}")
-        print("-" * 60)
-        # 简单打印表格预览
-        print(f"{'Instance':<10} {'Obj':<10} {'BKS':<10} {'Gap':<10} {'Time':<10}")
         for r in results:
-            print(f"{r['Instance']:<10} {r['Obj']:<10} {r['BKS_Obj']:<10} {r['Gap_Pct']:<10} {r['Time']:<10}")
+            dist_str = str(r['Pure_Dist'])
+            print(f"{r['Instance']:<10} {dist_str:<10} {r['BKS_Dist']:<10} {r['Gap_Pct']:<10} {r['Time(s)']:<10} {r['Trucks']:<5}")
     else:
         print("No results generated.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run VRPTW Benchmark")
-    
-    # 允许命令行传入列表: python benchmark.py C101 C102 R101
-    parser.add_argument('instances', metavar='N', type=str, nargs='*',
-                        help='List of instance names (e.g., C101 R101)')
-    
-    args = parser.parse_args()
-    
-    # 如果命令行没有给参数，默认运行列表（你可以在这里手动修改默认测试集）
-    target_list = args.instances
-    if not target_list:
-        target_list = ["C101", "C102","R101","R102"] # <--- 默认列表在这里改
-        
-    run_benchmark(target_list)
+    run_benchmark()

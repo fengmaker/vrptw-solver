@@ -115,10 +115,39 @@ void BucketGraph::build(const ProblemData& data) {
     }
 }
 
+
+void LabelingSolver::reset_forbidden_mask(const std::vector<std::pair<int, int>>& arcs) {
+    int N = data.num_nodes;
+    // 1. 如果 mask 大小不对（比如第一次运行），重新分配
+    if (forbidden_mask.size() != N * N) {
+        forbidden_mask.assign(N * N, false);
+    } else {
+        // 2. 快速清零 (利用 std::vector<bool> 的优化特性，或者 assign false)
+        std::fill(forbidden_mask.begin(), forbidden_mask.end(), false);
+    }
+
+    // 3. 标记禁止的边
+    for (const auto& arc : arcs) {
+        int u = arc.first;
+        int v = arc.second;
+        if (u >= 0 && u < N && v >= 0 && v < N) {
+            forbidden_mask[u * N + v] = true;
+        }
+    }
+}
+
+inline bool LabelingSolver::is_arc_forbidden(int u, int v) const {
+    // 这里的查表速度是 O(1)，极快
+    return forbidden_mask[u * data.num_nodes + v];
+}
 // =======================
 // 主求解逻辑
 // =======================
-std::vector<std::vector<int>> LabelingSolver::solve(const std::vector<double>& duals) {
+std::vector<std::vector<int>> LabelingSolver::solve(
+    const std::vector<double>& duals,
+    const std::vector<std::pair<int, int>>& forbidden_arcs) {
+    // 0. [新增] 设置禁止表
+    reset_forbidden_mask(forbidden_arcs);
     // 1. 重置
     label_pool.clear();
     for(auto& vec : dominance_sets) vec.clear();
@@ -158,7 +187,10 @@ std::vector<std::vector<int>> LabelingSolver::solve(const std::vector<double>& d
             const auto& arcs = graph.nodes_outgoing_arcs[i];
             for (const auto& arc : arcs) {
                 int j = arc.target;
-
+                // === [新增] 分支核心逻辑：如果是禁止边，直接跳过 ===
+                if (is_arc_forbidden(i, j)) {
+                    continue; 
+                }
                 // a. ng-Route 可行性检查 (保持不变)
                 if (curr_label.visited_mask.test(j)) continue;
 
@@ -242,7 +274,7 @@ std::vector<std::vector<int>> LabelingSolver::solve(const std::vector<double>& d
     std::sort(best_labels.begin(), best_labels.end());
     
     // 限制返回路径数量 (Heuristic limit)
-    int limit = std::min((int)best_labels.size(), 50);
+    int limit = std::min((int)best_labels.size(), 1000);
     std::vector<std::vector<int>> results;
 
     for(int k=0; k<limit; ++k) {

@@ -2,7 +2,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h> // 必须包含！负责 vector <-> list 转换
 #include "pricing_engine.h"
-
 namespace py = pybind11;
 
 PYBIND11_MODULE(pricing_lib, m) {
@@ -26,7 +25,9 @@ PYBIND11_MODULE(pricing_lib, m) {
     py::class_<LabelingSolver>(m, "LabelingSolver")
         .def(py::init<ProblemData, double>(), 
              py::arg("data"), py::arg("bucket_step"))
+        // [修改] 绑定新的 solve 签名
         .def("solve", &LabelingSolver::solve, 
              py::arg("duals"),
-             "Solve the pricing problem with given duals");
+             py::arg("forbidden_arcs") = std::vector<std::pair<int, int>>(), // 默认参数为空
+             "Solve ESPPRC with duals and optional forbidden arcs");
 }

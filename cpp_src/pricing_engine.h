@@ -98,7 +98,10 @@ public:
 class LabelingSolver {
 public:
     LabelingSolver(ProblemData p_data, double p_bucket_step);
-    std::vector<std::vector<int>> solve(const std::vector<double>& duals);
+    std::vector<std::vector<int>> solve(
+        const std::vector<double>& duals,
+        const std::vector<std::pair<int, int>>& forbidden_arcs = {} // 默认为空
+    );
 
 private:
     ProblemData data;
@@ -107,7 +110,14 @@ private:
     std::vector<Label> label_pool;
     std::vector<std::vector<int>> dominance_sets;
     std::vector<std::vector<int>> buckets;
+    // [新增] 扁平化的一维布尔数组，模拟二维矩阵 N x N
+    // index = u * num_nodes + v
+    // true 表示 u->v 禁止通行
+    std::vector<bool> forbidden_mask;
 
+    void reset_forbidden_mask(const std::vector<std::pair<int, int>>& arcs);
+    bool is_arc_forbidden(int u, int v) const;
+    
     bool check_and_update_dominance(int node, const Label& new_label);
 };
 
